@@ -31,16 +31,6 @@ Before getting started, you'll need:
    cd nova-act-mcp
    ```
 
-2. Install dependencies:
-   ```bash
-   pip install -e '.[dev]'
-   ```
-   
-   Or with uv (recommended):
-   ```bash
-   uv install -e '.[dev]'
-   ```
-
 ## Getting Started
 
 ### 1. Obtain a Nova Act API Key
