@@ -33,15 +33,21 @@ Before getting started, you'll need:
 
 ## Getting Started
 
+This guide focuses on setting up the server with the Claude Desktop application, but `nova-act-mcp` is designed to work with any Model Context Protocol (MCP) compatible client, such as Visual Studio Code or others. Consult your specific client's documentation for instructions on integrating MCP servers.
+
+![Nova Act MCP Claude Example](assets/search_news_claude_desktop.png)
+
 ### 1. Obtain a Nova Act API Key
 
 1. Go to [https://nova.amazon.com/act](https://nova.amazon.com/act)
 2. Generate a new API key
 3. Save it for the next step
 
-### 2. Configure Claude Desktop
+### 2. Configure Your MCP Client (Example: Claude Desktop)
 
-1. Install Claude Desktop from [https://claude.ai/desktop](https://claude.ai/desktop)
+The following steps show how to configure the Claude Desktop application. If you are using a different MCP client, adapt these instructions accordingly.
+
+1. Install Claude Desktop from [https://claude.ai/desktop](https://claude.ai/desktop) (if using Claude).
 2. Open your Claude for Desktop App configuration:
 
    ```bash
@@ -80,9 +86,9 @@ Before getting started, you'll need:
 
 4. Save the file and restart Claude Desktop
 
-### 3. Using with Claude
+### 3. Using with Your MCP Client (Example: Claude)
 
-Once configured, you can use the browser automation tool with Claude. Look for the hammer icon (🔨) in Claude Desktop, which indicates available MCP tools.
+Once configured, you can use the browser automation tool with your MCP client. For Claude Desktop, look for the hammer icon (🔨), which indicates available MCP tools.
 
 Try a simple example like this:
 
@@ -140,6 +146,8 @@ The nova-act-mcp server maintains browser profiles in the `profiles/` directory,
 Each profile is isolated, so you can maintain different identities or login states.
 
 ## Testing
+
+Running the server with the MCP Inspector is a great way to get started and verify that your setup is working correctly, independent of any specific AI assistant or client application.
 
 You can test the nova-act-mcp server using the MCP Inspector tool:
 
