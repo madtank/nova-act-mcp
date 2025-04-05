@@ -792,9 +792,9 @@ async def test_browser_connection() -> str:
     # Create the result object
     result = BrowserResult(
         success=result_details.get("success", False),
-        text=f"Browser test {'successful' if result_details.get('success', False) else 'failed'} " +
-             f"in {result_details.get('elapsed_time', 0):.2f} seconds" +
-             (f" ({result_details.get('steps_executed', 0)} steps executed)" 
+        text=f"Browser test {'successful' if result_details.get("success", False) else 'failed'} " +
+             f"in {result_details.get("elapsed_time", 0):.2f} seconds" +
+             (f" ({result_details.get("steps_executed", 0)} steps executed)" 
               if result_details.get("success", False) else ""),
         details=result_details
     )
@@ -817,6 +817,386 @@ async def test_browser_connection() -> str:
                 "elapsed_time": time.time() - start_time
             }
         })
+
+@mcp.tool()
+async def browser_session(action: str, session_id: Optional[str] = None, url: Optional[str] = None, instruction: Optional[str] = None, extraction_query: Optional[str] = None, headless: Optional[bool] = True) -> str:
+    """Manage and interact with browser sessions.
+    
+    This tool allows you to create, manage, and interact with browser sessions.
+    
+    Args:
+        action: The operation to perform ("start", "execute", "extract", "end")
+        session_id: Required for all actions except "start"
+        url: Starting URL when action is "start" or navigation URL
+        instruction: Natural language instruction for "execute" action
+        extraction_query: What to extract for "extract" action
+        headless: Whether to run in headless mode (for "start")
+    
+    Returns:
+        A JSON string containing the results of the action
+    """
+    # Ensure environment is initialized
+    initialize_environment()
+    
+    if not NOVA_ACT_AVAILABLE:
+        return BrowserResult(
+            success=False,
+            text="Error: Nova Act package is not installed. Please install with: pip install nova-act"
+        ).model_dump_json()
+    
+    # Get API key at runtime
+    api_key = get_nova_act_api_key()
+    if not api_key:
+        return BrowserResult(
+            success=False,
+            text="Error: Nova Act API key not found. Please check your MCP config or set the NOVA_ACT_API_KEY environment variable."
+        ).model_dump_json()
+    
+    # Handle the "start" action
+    if action == "start":
+        if not url:
+            return BrowserResult(
+                success=False,
+                text="Error: URL is required for 'start' action."
+            ).model_dump_json()
+        
+        # Generate a new session ID
+        session_id = generate_session_id()
+        log(f"Starting new browser session with session ID: {session_id}")
+        
+        # Create a progress context
+        progress_context = {
+            "current_step": 0,
+            "total_steps": 1,
+            "current_action": "initializing",
+            "is_complete": False,
+            "last_update": time.time(),
+            "error": None
+        }
+        
+        # Register this session in the global registry
+        with session_lock:
+            active_sessions[session_id] = {
+                "session_id": session_id,
+                "identity": DEFAULT_PROFILE,
+                "status": "initializing",
+                "progress": progress_context,
+                "url": url,
+                "steps": [],
+                "results": [],
+                "last_updated": time.time(),
+                "nova": None,
+                "complete": False
+            }
+        
+        # Start the browser session
+        try:
+            profile_dir = os.path.join(PROFILES_DIR, DEFAULT_PROFILE)
+            os.makedirs(profile_dir, exist_ok=True)
+            
+            with NovaAct(
+                starting_page=url,
+                nova_act_api_key=api_key,
+                user_data_dir=profile_dir,
+                headless=headless
+            ) as nova:
+                # Store NovaAct's own session ID for debugging
+                if hasattr(nova, 'session_id'):
+                    nova_session_id = nova.session_id
+                    log_session_info("NovaAct session started", session_id, nova_session_id)
+                
+                # Register the browser instance in the session registry
+                with session_lock:
+                    if session_id in active_sessions:
+                        active_sessions[session_id]["nova"] = nova
+                        active_sessions[session_id]["status"] = "browser_open"
+                        if nova_session_id:
+                            active_sessions[session_id]["nova_session_id"] = nova_session_id
+                
+                # Return the session ID and initial status
+                return json.dumps({
+                    "session_id": session_id,
+                    "status": "browser_open",
+                    "current_url": nova.page.url,
+                    "page_title": nova.page.title(),
+                    "action_taken": "Browser session started",
+                    "visible_elements_summary": "N/A",
+                    "extracted_data": None,
+                    "errors": None,
+                    "screenshot_base64": None
+                })
+        
+        except Exception as e:
+            error_message = str(e)
+            error_tb = traceback.format_exc()
+            log(f"Error starting browser session: {error_message}")
+            log(f"Traceback: {error_tb}")
+            
+            # Update progress context with the error
+            progress_context["error"] = error_message
+            progress_context["current_action"] = f"Error: {error_message[:100]}..."
+            
+            # Update session registry with error
+            with session_lock:
+                if session_id in active_sessions:
+                    active_sessions[session_id]["status"] = "error"
+                    active_sessions[session_id]["error"] = error_message
+            
+            return BrowserResult(
+                success=False,
+                text=f"Error starting browser session: {error_message}",
+                details={
+                    "error": error_message,
+                    "traceback": error_tb,
+                    "session_id": session_id
+                }
+            ).model_dump_json()
+    
+    # Handle the "execute" action
+    elif action == "execute":
+        if not session_id or not instruction:
+            return BrowserResult(
+                success=False,
+                text="Error: session_id and instruction are required for 'execute' action."
+            ).model_dump_json()
+        
+        # Get the session data
+        with session_lock:
+            session_data = active_sessions.get(session_id)
+        
+        if not session_data:
+            return BrowserResult(
+                success=False,
+                text=f"Error: No active session found with session_id: {session_id}"
+            ).model_dump_json()
+        
+        # Execute the instruction
+        try:
+            nova = session_data.get("nova")
+            if not nova:
+                return BrowserResult(
+                    success=False,
+                    text=f"Error: No active browser instance found for session_id: {session_id}"
+                ).model_dump_json()
+            
+            result = nova.act(instruction, timeout=DEFAULT_TIMEOUT)
+            
+            # Get the current URL after the action
+            current_url = nova.page.url
+            page_title = nova.page.title()
+            
+            # Extract the response properly
+            response_content = None
+            if hasattr(result, 'response') and result.response is not None:
+                if isinstance(result.response, str):
+                    response_content = result.response
+                elif isinstance(result.response, dict):
+                    response_content = result.response
+                elif hasattr(result.response, '__dict__'):
+                    try:
+                        response_content = result.response.__dict__
+                    except:
+                        response_content = str(result.response)
+                else:
+                    try:
+                        json.dumps(result.response)
+                        response_content = result.response
+                    except:
+                        response_content = str(result.response)
+            else:
+                response_content = f"Page title: {page_title}, URL: {current_url}"
+            
+            # Update session registry with results
+            with session_lock:
+                if session_id in active_sessions:
+                    active_sessions[session_id]["url"] = current_url
+                    active_sessions[session_id]["results"].append({
+                        "action": instruction,
+                        "response": response_content
+                    })
+            
+            return json.dumps({
+                "session_id": session_id,
+                "status": "action_executed",
+                "current_url": current_url,
+                "page_title": page_title,
+                "action_taken": instruction,
+                "visible_elements_summary": "N/A",
+                "extracted_data": None,
+                "errors": None,
+                "screenshot_base64": None
+            })
+        
+        except Exception as e:
+            error_message = str(e)
+            error_tb = traceback.format_exc()
+            log(f"Error executing instruction: {error_message}")
+            log(f"Traceback: {error_tb}")
+            
+            return BrowserResult(
+                success=False,
+                text=f"Error executing instruction: {error_message}",
+                details={
+                    "error": error_message,
+                    "traceback": error_tb,
+                    "session_id": session_id
+                }
+            ).model_dump_json()
+    
+    # Handle the "extract" action
+    elif action == "extract":
+        if not session_id or not extraction_query:
+            return BrowserResult(
+                success=False,
+                text="Error: session_id and extraction_query are required for 'extract' action."
+            ).model_dump_json()
+        
+        # Get the session data
+        with session_lock:
+            session_data = active_sessions.get(session_id)
+        
+        if not session_data:
+            return BrowserResult(
+                success=False,
+                text=f"Error: No active session found with session_id: {session_id}"
+            ).model_dump_json()
+        
+        # Execute the extraction query
+        try:
+            nova = session_data.get("nova")
+            if not nova:
+                return BrowserResult(
+                    success=False,
+                    text=f"Error: No active browser instance found for session_id: {session_id}"
+                ).model_dump_json()
+            
+            result = nova.extract(extraction_query, timeout=DEFAULT_TIMEOUT)
+            
+            # Get the current URL after the action
+            current_url = nova.page.url
+            page_title = nova.page.title()
+            
+            # Extract the response properly
+            response_content = None
+            if hasattr(result, 'response') and result.response is not None:
+                if isinstance(result.response, str):
+                    response_content = result.response
+                elif isinstance(result.response, dict):
+                    response_content = result.response
+                elif hasattr(result.response, '__dict__'):
+                    try:
+                        response_content = result.response.__dict__
+                    except:
+                        response_content = str(result.response)
+                else:
+                    try:
+                        json.dumps(result.response)
+                        response_content = result.response
+                    except:
+                        response_content = str(result.response)
+            else:
+                response_content = f"Page title: {page_title}, URL: {current_url}"
+            
+            # Update session registry with results
+            with session_lock:
+                if session_id in active_sessions:
+                    active_sessions[session_id]["url"] = current_url
+                    active_sessions[session_id]["results"].append({
+                        "action": extraction_query,
+                        "response": response_content
+                    })
+            
+            return json.dumps({
+                "session_id": session_id,
+                "status": "data_extracted",
+                "current_url": current_url,
+                "page_title": page_title,
+                "action_taken": extraction_query,
+                "visible_elements_summary": "N/A",
+                "extracted_data": response_content,
+                "errors": None,
+                "screenshot_base64": None
+            })
+        
+        except Exception as e:
+            error_message = str(e)
+            error_tb = traceback.format_exc()
+            log(f"Error extracting data: {error_message}")
+            log(f"Traceback: {error_tb}")
+            
+            return BrowserResult(
+                success=False,
+                text=f"Error extracting data: {error_message}",
+                details={
+                    "error": error_message,
+                    "traceback": error_tb,
+                    "session_id": session_id
+                }
+            ).model_dump_json()
+    
+    # Handle the "end" action
+    elif action == "end":
+        if not session_id:
+            return BrowserResult(
+                success=False,
+                text="Error: session_id is required for 'end' action."
+            ).model_dump_json()
+        
+        # Get the session data
+        with session_lock:
+            session_data = active_sessions.get(session_id)
+        
+        if not session_data:
+            return BrowserResult(
+                success=False,
+                text=f"Error: No active session found with session_id: {session_id}"
+            ).model_dump_json()
+        
+        # End the browser session
+        try:
+            nova = session_data.get("nova")
+            if nova and hasattr(nova, 'close') and not getattr(nova, '_closed', True):
+                nova.close()
+            
+            # Update session registry
+            with session_lock:
+                if session_id in active_sessions:
+                    active_sessions[session_id]["status"] = "ended"
+                    active_sessions[session_id]["complete"] = True
+            
+            return json.dumps({
+                "session_id": session_id,
+                "status": "ended",
+                "current_url": None,
+                "page_title": None,
+                "action_taken": "Browser session ended",
+                "visible_elements_summary": "N/A",
+                "extracted_data": None,
+                "errors": None,
+                "screenshot_base64": None
+            })
+        
+        except Exception as e:
+            error_message = str(e)
+            error_tb = traceback.format_exc()
+            log(f"Error ending browser session: {error_message}")
+            log(f"Traceback: {error_tb}")
+            
+            return BrowserResult(
+                success=False,
+                text=f"Error ending browser session: {error_message}",
+                details={
+                    "error": error_message,
+                    "traceback": error_tb,
+                    "session_id": session_id
+                }
+            ).model_dump_json()
+    
+    else:
+        return BrowserResult(
+            success=False,
+            text=f"Error: Unknown action '{action}'. Valid actions are 'start', 'execute', 'extract', 'end'."
+        ).model_dump_json()
 
 def main():
     """Main function to run the MCP server"""
@@ -844,6 +1224,7 @@ def main():
     log("- Tool: execute_browser_workflow - Run multi-step browser actions ✓")
     log("- Tool: test_browser_connection - Quick browser test ✓")
     log("- Tool: get_browser_sessions - Get active browser sessions ✓")
+    log("- Tool: browser_session - Manage and interact with browser sessions ✓")
     
     log("\nStarting MCP server...")
     # Initialize and run the server
