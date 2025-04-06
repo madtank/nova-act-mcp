@@ -1,19 +1,19 @@
 # nova-act-mcp
 
-An MCP server providing tools to control web browsers using the Amazon Nova Act SDK. Enables multi-step browser automation workflows via MCP agents.
+An MCP server providing tools to control web browsers using the Amazon Nova Act SDK. Enables interactive browser automation with transparent agent reasoning via MCP.
 
 ![Nova Act MCP Example](assets/search_news.png)
 
 ## What is nova-act-mcp?
 
-Nova Act MCP is a bridge between Amazon's Nova Act browser automation SDK and the Model Context Protocol (MCP). It allows AI assistants like Claude to control web browsers to perform complex tasks through natural language instructions.
+Nova Act MCP is a bridge between Amazon's Nova Act browser automation SDK and the Model Context Protocol (MCP). It allows AI assistants like Claude to control web browsers to perform tasks through natural language instructions, while providing visibility into the agent's reasoning process.
 
 This project exposes Nova Act's powerful browser automation capabilities through an MCP server interface, making it easy to:
 
 1. Control web browsers directly from AI assistants
-2. Execute multi-step browser workflows
-3. Maintain browser sessions between interactions
-4. Automate repetitive web tasks with AI guidance
+2. Execute interactive browser automation tasks
+3. Maintain browser sessions between interactions 
+4. See the agent's step-by-step reasoning process
 
 ## Prerequisites
 
@@ -29,6 +29,10 @@ Before getting started, you'll need:
    ```bash
    git clone https://github.com/yourusername/nova-act-mcp.git
    cd nova-act-mcp
+   ```
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
    ```
 
 ## Getting Started
@@ -93,12 +97,22 @@ Once configured, you can use the browser automation tool with your MCP client. F
 Try a simple example like this:
 
 ```
-Can you help me find a teapot on Amazon? Use the nova-browser tool to:
-1. Go to amazon.com
-2. Search for "tea pots"
-3. Select the first result
-4. Add it to the cart
+Can you help me search for news on Google? Use the nova-browser tool to:
+1. Start a session on google.com
+2. Execute the instruction "search for news"
+3. Tell me what you see and your reasoning process
 ```
+
+## Understanding Agent Thinking
+
+One of the key features of nova-act-mcp is the ability to see the agent's reasoning process. When the agent performs actions in the browser, you'll see detailed explanations of:
+
+1. How it's interpreting your instructions
+2. What elements it sees on the page
+3. Why it's choosing specific actions
+4. How it confirms successful completion
+
+This transparency helps you understand how the agent is approaching tasks and makes debugging easier when something doesn't work as expected.
 
 ## Tips for Effective Browser Automation
 
@@ -107,30 +121,25 @@ Can you help me find a teapot on Amazon? Use the nova-browser tool to:
 When prompting for browser actions:
 
 ✅ **DO**:
-- Use specific, concrete instructions
-- Break complex tasks into smaller steps
-- Be explicit about what to click or interact with
+- Provide clear, actionable instructions
+- Focus on one task at a time
+- Be specific about what elements to interact with
 
 ❌ **DON'T**:
-- Use vague or open-ended instructions
-- Request multi-page workflows in a single step
-- Ask the agent to "browse" or "explore" without specific goals
+- Use vague or ambiguous language
+- Request complex multi-step actions in a single instruction
+- Ask for subjective evaluations without clear criteria
 
 ### Example of Good Instructions
 
-```
-Please use nova-browser to:
-1. Go to amazon.com
-2. Search for "bluetooth headphones"
-3. Filter by 4+ stars
-4. Sort by price low to high
-5. Add the first item that costs more than $30 to the cart
-```
-
-### Example of Problematic Instructions
+Instead of trying to do everything at once, break it down into interactive steps:
 
 ```
-Please use nova-browser to find me some good deals on headphones and buy the best one.
+1. Start a session on amazon.com
+2. Execute "search for bluetooth headphones"
+3. Execute "filter by 4+ stars"
+4. Execute "sort by price low to high"
+5. Execute "find the price of the first item"
 ```
 
 ## Advanced Features
@@ -141,13 +150,32 @@ The nova-act-mcp server maintains browser profiles in the `profiles/` directory,
 
 - Maintain login sessions between uses
 - Keep cookies and local storage data
-- Resume workflows where you left off
+- Resume workflows in later conversations
 
 Each profile is isolated, so you can maintain different identities or login states.
 
-## Testing
+### Browser Session Management
 
-Running the server with the MCP Inspector is a great way to get started and verify that your setup is working correctly, independent of any specific AI assistant or client application.
+The following actions are available for browser session management:
+
+1. **start** - Starts a new browser session with a specified URL
+2. **execute** - Executes a natural language instruction in the current session
+3. **end** - Ends the current browser session and cleans up resources
+
+Example flow:
+```
+# Start a session
+start: https://www.google.com
+
+# Execute instructions
+execute: search for weather in San Francisco
+execute: click on the first result
+
+# End the session
+end
+```
+
+## Testing
 
 You can test the nova-act-mcp server using the MCP Inspector tool:
 
@@ -159,26 +187,26 @@ npm install -g @modelcontextprotocol/inspector
 NOVA_ACT_API_KEY="your_api_key_here" npx @modelcontextprotocol/inspector uv --directory /path/to/nova-act-mcp run nova_mcp.py
 ```
 
-Then use the following input format to test a simple Amazon shopping workflow:
+Then use the following input format to test a simple browser action:
 
 ```json
 {
-  "starting_url": "https://www.amazon.com",
-  "steps": [
-    "search for tea pots",
-    "select the first result",
-    "add to cart"
-  ]
+  "action": "start",
+  "url": "https://www.google.com"
 }
 ```
 
-This will:
-1. Open a browser window to Amazon.com
-2. Search for "tea pots"
-3. Click on the first search result
-4. Add the item to the cart
+Followed by:
 
-This simple test demonstrates the core functionality and confirms your setup is working correctly.
+```json
+{
+  "action": "execute",
+  "session_id": "your_session_id_from_previous_response",
+  "instruction": "search for tea pots"
+}
+```
+
+This lets you verify that the server is working correctly and see exactly what the agent is thinking during each step.
 
 ## Troubleshooting
 
@@ -194,9 +222,19 @@ If you see an error about the Nova Act API key:
 
 If the browser is not behaving as expected:
 
-1. Check that your prompts are specific and actionable
-2. Break down complex tasks into smaller steps
+1. Check the agent_thinking field in the response to see how the agent is interpreting your instructions
+2. Make your instructions more specific and actionable
 3. For tasks involving forms or logins, be explicit about field names
+
+### Debug Mode
+
+To enable more detailed debugging information:
+
+```bash
+export NOVA_MCP_DEBUG=1
+```
+
+This will include additional diagnostic information in the responses.
 
 ## License
 
@@ -207,32 +245,11 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [Amazon Nova Act](https://labs.amazon.science/blog/nova-act) for providing the browser automation SDK
 - [Model Context Protocol (MCP)](https://github.com/anthropics/anthropic-cookbook/tree/main/mcp) for the AI agent communication standard
 
-## Best Practices
+## Feedback for Amazon Nova Act
 
-### Writing Effective Browser Instructions
+While we've implemented agent thinking extraction, we note that this information should ideally be directly accessible through the Nova Act API. The current approach requires parsing HTML trace files, which is less efficient than having a dedicated API method. We welcome any future improvements to the Nova Act SDK that would make this process more straightforward.
 
-For the best results when using nova-act-mcp:
-
-1. **Be specific and direct**: Tell the browser exactly what to do in each step
-   ```
-   "Click the 'Add to Cart' button"
-   ```
-   Not: "Maybe we should add this to our cart"
-
-2. **Keep instructions short**: Each step should be a single, clear action
-   ```
-   "Search for 'wireless headphones'"
-   ```
-   Not: "Let's look for some wireless headphones that have good battery life and are affordable"
-
-3. **Use common web terminology**: Use terms like "click", "search", "select", "scroll", etc.
-   ```
-   "Click on the 'Sign In' link"
-   ```
-
-4. **Sequential steps work best**: Break complex tasks into a series of simple steps
-
-### Limitations
+## Limitations
 
 - **No file uploads**: The browser automation can't upload files from your local system
 - **Limited to web interactions**: Can only interact with elements visible on the webpage

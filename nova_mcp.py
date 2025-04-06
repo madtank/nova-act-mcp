@@ -188,6 +188,119 @@ def create_jsonrpc_response(id, result=None, error=None):
     # Return as Python dict, not as JSON string - let the MCP framework handle serialization
     return response
 
+# Flag to enable debug mode - false by default, can be enabled with env var
+DEBUG_MODE = os.environ.get("NOVA_MCP_DEBUG", "0") == "1"
+
+def extract_agent_thinking(result, nova=None, logs_dir=None, instruction=None):
+    """
+    Extract agent thinking from Nova Act results using multiple methods.
+    """
+    agent_messages = []
+    extraction_methods_tried = []
+    debug_info = {}
+    
+    # Method 1: Direct attributes (unchanged)
+    
+    # Method 2: Parse HTML output file - Updated regex pattern!
+    extraction_methods_tried.append("html_file")
+    if hasattr(result, 'metadata') and result.metadata:
+        nova_session_id = result.metadata.session_id
+        nova_act_id = result.metadata.act_id
+        debug_info["nova_session_id"] = nova_session_id
+        debug_info["nova_act_id"] = nova_act_id
+        
+        # Get logs directory
+        if not logs_dir and nova and hasattr(nova, 'logs_directory'):
+            logs_dir = nova.logs_directory
+            
+        # Try both direct path and searching through temp directories
+        html_paths = []
+        
+        # Direct path attempt
+        if logs_dir and nova_session_id and nova_act_id:
+            direct_path = os.path.join(logs_dir, nova_session_id, f"act_{nova_act_id}_output.html")
+            if os.path.exists(direct_path):
+                html_paths.append(direct_path)
+        
+        # Search in temp directories
+        temp_dir = tempfile.gettempdir()
+        for root, dirs, files in os.walk(temp_dir):
+            if nova_session_id in root:
+                for file in files:
+                    if file.startswith(f"act_{nova_act_id}") and file.endswith("_output.html"):
+                        html_paths.append(os.path.join(root, file))
+        
+        debug_info["html_paths_found"] = html_paths
+        
+        # Process all found HTML files
+        for html_path in html_paths:
+            log(f"Parsing HTML file: {html_path}")
+            try:
+                with open(html_path, 'r') as f:
+                    html_content = f.read()
+                
+                # Log a snippet for debugging
+                log(f"HTML snippet (first 100 chars): {html_content[:100]}")
+                
+                # Updated pattern to match both formats
+                think_patterns = re.findall(r'(?:\w+> )?think\("([^"]*)"\);?', html_content, re.DOTALL)
+                
+                # Also try a more direct approach looking for pre tags
+                if not think_patterns:
+                    # This is a simple pattern that might work with the HTML structure
+                    think_patterns = re.findall(r'<pre[^>]*>(?:\w+> )?think\("([^"]*?)"\);?</pre>', html_content, re.DOTALL)
+                
+                # Process extracted patterns
+                for pattern in think_patterns:
+                    # Clean up the content
+                    cleaned = pattern.replace('\\n', '\n').replace('\\\"', '"')
+                    agent_messages.append(cleaned)
+                
+                log(f"Extracted {len(think_patterns)} thinking patterns from HTML")
+                debug_info["html_patterns_found"] = think_patterns
+                debug_info["source"] = "html_file"
+                
+                # If we found thinking, break out of the loop
+                if think_patterns:
+                    break
+                    
+            except Exception as e:
+                log(f"Error parsing HTML file: {str(e)}")
+                debug_info["html_error"] = str(e)
+    
+    # Method 3: Parse logs directly (updated pattern)
+    extraction_methods_tried.append("direct_logs")
+    if not agent_messages and nova and hasattr(nova, 'get_logs') and callable(getattr(nova, 'get_logs', None)):
+        try:
+            logs = nova.get_logs()
+            debug_info["log_count"] = len(logs)
+            
+            think_count = 0
+            for log_line in logs:
+                if 'think("' in log_line:
+                    # Updated pattern to handle session prefixes
+                    thinking_match = re.search(r'(?:\w+> )?think\("([^"]*)"\)', log_line)
+                    if thinking_match:
+                        thought = thinking_match.group(1).replace('\\n', '\n').replace('\\\"', '"')
+                        if thought not in agent_messages:
+                            agent_messages.append(thought)
+                            think_count += 1
+                            
+            if think_count > 0:
+                debug_info["source"] = "direct_logs"
+                debug_info["think_patterns_found"] = think_count
+        except Exception as e:
+            log(f"Error parsing logs: {str(e)}")
+            debug_info["logs_error"] = str(e)
+    
+    # Method 4 (unchanged)
+    
+    # Fallback method (unchanged)
+    
+    debug_info["extraction_methods"] = extraction_methods_tried
+    debug_info["message_count"] = len(agent_messages)
+    
+    return agent_messages, debug_info
 @mcp.tool()
 async def get_browser_sessions() -> str:
     """Get the status of all active browser sessions.
@@ -440,8 +553,7 @@ async def browser_session(action: str, session_id: Optional[str] = None, url: Op
                 profile_dir = os.path.join(PROFILES_DIR, DEFAULT_PROFILE)
                 log(f"Creating new NovaAct instance for execute with URL: {current_url}")
                 
-                # Track agent messages and HTML output paths
-                agent_messages = []
+                # Track HTML output paths
                 output_html_paths = []
                 
                 # Create and initialize NovaAct for this specific action
@@ -471,10 +583,6 @@ async def browser_session(action: str, session_id: Optional[str] = None, url: Op
                             )
                             if os.path.exists(possible_html_path):
                                 output_html_paths.append(possible_html_path)
-                        
-                        # Extract agent messages from load result
-                        if hasattr(load_result, 'agent_messages') and load_result.agent_messages:
-                            agent_messages.extend(load_result.agent_messages)
                     
                     # Execute the instruction
                     log(f"Executing instruction: {instruction}")
@@ -542,34 +650,14 @@ async def browser_session(action: str, session_id: Optional[str] = None, url: Op
                                             log(f"Found HTML output path in temp dir: {html_output_path}")
                                             break
                     
-                    # Parse agent messages from the log
-                    # Try to extract thinking lines from logs
-                    if hasattr(nova, 'get_logs') and callable(getattr(nova, 'get_logs', None)):
-                        logs = nova.get_logs()
-                        for log_line in logs:
-                            if 'think("' in log_line:
-                                # Extract text within think() call
-                                thinking_match = re.search(r'think\("([^"]*)"\)', log_line)
-                                if thinking_match:
-                                    agent_messages.append(thinking_match.group(1).replace('\\n', '\n').replace('\\\"', '"'))
+                    # Use the new extraction function to get agent thinking
+                    agent_messages, debug_info = extract_agent_thinking(
+                        result, 
+                        nova, 
+                        logs_dir if 'logs_dir' in locals() else None,
+                        instruction
+                    )
                     
-                    # If we don't have agent messages, check result attributes
-                    if not agent_messages:
-                        if hasattr(result, 'agent_messages') and result.agent_messages:
-                            agent_messages = result.agent_messages
-                        elif hasattr(result, 'thinking') and result.thinking:
-                            agent_messages = [result.thinking]
-                        elif hasattr(result, 'log_messages'):
-                            for log_msg in result.log_messages:
-                                if 'think(' in log_msg:
-                                    thinking_match = re.search(r'think\("([^"]*)"\)', log_msg)
-                                    if thinking_match:
-                                        agent_messages.append(thinking_match.group(1).replace('\\n', '\n').replace('\\\"', '"'))
-                    
-                    # If we still don't have agent messages, add a basic one
-                    if not agent_messages:
-                        agent_messages.append(f"Executed instruction: {instruction}")
-                        
                     # Take a screenshot
                     screenshot_data = None
                     try:
@@ -590,17 +678,34 @@ async def browser_session(action: str, session_id: Optional[str] = None, url: Op
                             "output_html_paths": output_html_paths
                         })
                 
+                # Format agent thinking for MCP response
+                agent_thinking = []
+                for message in agent_messages:
+                    agent_thinking.append({
+                        "type": "reasoning",
+                        "content": message,
+                        "source": "nova_act"
+                    })
+                
                 # Create result properly formatted for JSON-RPC
-                agent_message_text = "\n".join(agent_messages) if agent_messages else "No agent messages recorded"
+                agent_message_text = "\n".join([msg["content"] for msg in agent_thinking]) if agent_thinking else "No agent messages recorded"
                 mcp_result = {
                     "content": [
                         {
                             "type": "text",
-                            "text": f"Successfully executed: {instruction}\n\nCurrent URL: {updated_url}\nPage Title: {page_title}\n\nAgent actions:\n{agent_message_text}"
+                            "text": f"Successfully executed: {instruction}\n\nCurrent URL: {updated_url}\nPage Title: {page_title}"
                         }
                     ],
+                    "agent_thinking": agent_thinking,
                     "isError": False
                 }
+                
+                # Include debug info if in debug mode
+                if DEBUG_MODE:
+                    mcp_result["debug"] = {
+                        "html_paths": output_html_paths,
+                        "extraction_info": debug_info
+                    }
                 
                 return mcp_result
                 
