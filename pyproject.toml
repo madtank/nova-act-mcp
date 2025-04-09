@@ -10,7 +10,7 @@ license = "MIT"  # Changed from table format to simple string
 requires-python = ">=3.10"
 dependencies = [
     "httpx>=0.28.1",
-    "mcp[cli]>=1.6.0",
+    "mcp>=1.6.0",
     "pydantic>=2.0.0",
     "nova-act",  # This will install from PyPI
     "playwright>=1.40.0",  # Explicit playwright dependency for browser automation
@@ -37,6 +37,13 @@ dev = [
     "isort>=5.12.0",
     "mypy>=1.5.1",
     "ruff>=0.1.5",
+]
+
+# Optional dependencies for Server-Sent Events (SSE) support
+sse = [
+    # "fastapi>=0.104.0",  # For HTTP/SSE transport
+    # "uvicorn>=0.23.0",  # ASGI server for FastAPI
+    # "starlette>=0.27.0",  # Required for SSE functionality
 ]
 
 # Use the tool.setuptools section to configure package discovery

@@ -747,12 +747,188 @@ async def browser_session(action: str, session_id: Optional[str] = None, url: Op
     
     # Handle the "extract" action
     elif action == "extract":
-        error = {
-            "code": -32601,
-            "message": "Extract action not implemented yet",
-            "data": None
-        }
-        return create_jsonrpc_response(request_id, error=error)
+        if not session_id or not extraction_query:
+            error = {
+                "code": -32602,
+                "message": "session_id and extraction_query are required for 'extract' action.",
+                "data": None
+            }
+            return create_jsonrpc_response(request_id, error=error)
+        
+        # Get the session data
+        with session_lock:
+            session_data = active_sessions.get(session_id)
+        
+        if not session_data:
+            error = {
+                "code": -32602,
+                "message": f"No active session found with session_id: {session_id}",
+                "data": None
+            }
+            return create_jsonrpc_response(request_id, error=error)
+        
+        # Get the URL from the session or use the provided URL
+        current_url = url if url else session_data.get("url")
+        if not current_url:
+            error = {
+                "code": -32602,
+                "message": f"No URL found for session. Please provide a URL.",
+                "data": None
+            }
+            return create_jsonrpc_response(request_id, error=error)
+            
+        # Define a synchronous function to run in a separate thread
+        def extract_data():
+            try:
+                # Create a new instance each time for extraction
+                profile_dir = os.path.join(PROFILES_DIR, DEFAULT_PROFILE)
+                log(f"Creating new NovaAct instance for extraction with URL: {current_url}")
+                
+                # Create and initialize NovaAct for this specific action
+                with NovaAct(
+                    starting_page=current_url,
+                    nova_act_api_key=api_key,
+                    user_data_dir=profile_dir,
+                    headless=headless if isinstance(headless, bool) else True
+                ) as nova:
+                    # Wait for the page to load
+                    log(f"Extraction: Wait for the page to fully load")
+                    nova.act("Wait for the page to fully load", timeout=30)
+                    
+                    # Execute the extraction instruction
+                    log(f"Extracting data with query: {extraction_query}")
+                    
+                    # Use an appropriate prompt for extraction
+                    extract_instruction = f"Extract the following information from the current page: {extraction_query}"
+                    result = nova.act(extract_instruction, timeout=DEFAULT_TIMEOUT)
+                    
+                    # Get the current URL and page title after extraction
+                    updated_url = nova.page.url
+                    page_title = nova.page.title()
+                    
+                    # Extract the response properly
+                    response_content = None
+                    if hasattr(result, 'response') and result.response is not None:
+                        if isinstance(result.response, str):
+                            response_content = result.response
+                        elif isinstance(result.response, dict):
+                            response_content = result.response
+                        elif hasattr(result.response, '__dict__'):
+                            try:
+                                response_content = result.response.__dict__
+                            except:
+                                response_content = str(result.response)
+                        else:
+                            try:
+                                json.dumps(result.response)
+                                response_content = result.response
+                            except:
+                                response_content = str(result.response)
+                    else:
+                        response_content = "No data could be extracted"
+                    
+                    # Take a screenshot
+                    screenshot_data = None
+                    try:
+                        screenshot_bytes = nova.page.screenshot()
+                        screenshot_data = base64.b64encode(screenshot_bytes).decode('utf-8')
+                        log("Captured screenshot during extraction")
+                    except Exception as e:
+                        log(f"Error taking screenshot during extraction: {str(e)}")
+                    
+                    # Use the extract_agent_thinking function to get agent thinking
+                    agent_messages, debug_info = extract_agent_thinking(result, nova, None, extract_instruction)
+                
+                # Update session registry with results
+                with session_lock:
+                    if session_id in active_sessions:
+                        active_sessions[session_id]["url"] = updated_url
+                        active_sessions[session_id]["results"].append({
+                            "action": "extract",
+                            "extraction_query": extraction_query,
+                            "response": response_content,
+                            "agent_messages": agent_messages
+                        })
+                
+                # Format agent thinking for MCP response
+                agent_thinking = []
+                for message in agent_messages:
+                    agent_thinking.append({
+                        "type": "reasoning",
+                        "content": message,
+                        "source": "nova_act"
+                    })
+                
+                # Create data structure for the response
+                extracted_data = None
+                
+                # Try to parse the response as JSON if it looks like it might be
+                if isinstance(response_content, str) and (response_content.strip().startswith('[') or response_content.strip().startswith('{')):
+                    try:
+                        extracted_data = json.loads(response_content)
+                    except:
+                        extracted_data = response_content
+                else:
+                    extracted_data = response_content
+                
+                # Create result properly formatted for JSON-RPC
+                mcp_result = {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"Data extracted with query: {extraction_query}"
+                        }
+                    ],
+                    "data": extracted_data,
+                    "agent_thinking": agent_thinking,
+                    "isError": False,
+                    "url": updated_url,
+                    "page_title": page_title
+                }
+                
+                # Include debug info if in debug mode
+                if DEBUG_MODE:
+                    mcp_result["debug"] = {
+                        "extraction_info": debug_info
+                    }
+                
+                return mcp_result
+                
+            except Exception as e:
+                error_message = str(e)
+                error_tb = traceback.format_exc()
+                log(f"Error extracting data: {error_message}")
+                log(f"Traceback: {error_tb}")
+                
+                raise Exception(error_message)
+        
+        # Run the synchronous code in a thread pool
+        try:
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                # Use run_in_executor to run the synchronous code in a separate thread
+                result = await asyncio.get_event_loop().run_in_executor(
+                    executor, extract_data
+                )
+                
+                # Return the result as a proper JSON-RPC response
+                return create_jsonrpc_response(request_id, result)
+                    
+        except Exception as e:
+            error_message = str(e)
+            error_tb = traceback.format_exc()
+            log(f"Error in thread execution during extraction: {error_message}")
+            log(f"Traceback: {error_tb}")
+            
+            error = {
+                "code": -32603,
+                "message": f"Error extracting data: {error_message}",
+                "data": {
+                    "traceback": error_tb,
+                    "session_id": session_id
+                }
+            }
+            
+            return create_jsonrpc_response(request_id, error=error)
     
     # Handle the "end" action
     elif action == "end":
