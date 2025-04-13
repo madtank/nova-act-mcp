@@ -47,7 +47,7 @@ Before getting started, you'll need:
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/yourusername/nova-act-mcp.git
+   git clone https://github.com/madtank/nova-act-mcp.git
    cd nova-act-mcp
    ```
 
@@ -57,7 +57,7 @@ Before getting started, you'll need:
 uv sync
 
 # For development only - if you need to add a new dependency
-# uv add package_name
+uv add package_name
 
 
 ## Getting Started
