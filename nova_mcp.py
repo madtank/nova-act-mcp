@@ -303,7 +303,7 @@ def extract_agent_thinking(result, nova=None, logs_dir=None, instruction=None):
     return agent_messages, debug_info
 
 @mcp.tool(name="list_browser_sessions", description="List all active and recent web browser sessions managed by Nova Act agent")
-async def get_browser_sessions() -> str:
+async def list_browser_sessions() -> str:
     """List all active and recent web browser sessions managed by Nova Act agent.
 
      Returns a JSON string with session IDs, status, progress, and error details for each session."""
