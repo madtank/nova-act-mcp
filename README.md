@@ -22,6 +22,7 @@ An MCP server providing tools to control web browsers using the Amazon Nova Act 
 - [Feedback for Amazon Nova Act](#feedback-for-amazon-nova-act)
 - [Limitations](#limitations)
 - [Development](#development)
+- [Future Enhancements](#future-enhancements)
 
 ## What is nova-act-mcp?
 
@@ -52,13 +53,13 @@ Before getting started, you'll need:
    ```
 
 2. Install dependencies:
+   ```bash
+   # Update dependencies after changing pyproject.toml or cloning
+   uv sync
 
-# Update dependencies after changing pyproject.toml
-uv sync
-
-# For development only - if you need to add a new dependency
-uv add package_name
-
+   # For development only - if you need to add a new dependency
+   # uv add package_name
+   ```
 
 ## Getting Started
 
@@ -96,13 +97,13 @@ The following steps show how to configure the Claude Desktop application. If you
          "command": "uv",
          "args": [
            "--directory",
-           "/full/path/to/nova-act-mcp",
+           "~/path/to/nova-act-mcp", // Replace with the absolute path to the cloned repo
            "run",
            "nova_mcp.py"
          ],
          "transport": "stdio",
          "env": {
-           "NOVA_ACT_API_KEY": "your_api_key_here"
+           "NOVA_ACT_API_KEY": "your_api_key_here" // Replace with your Nova Act API key
          }
        }
      }
@@ -110,7 +111,7 @@ The following steps show how to configure the Claude Desktop application. If you
    ```
 
    Replace:
-   - `/full/path/to/nova-act-mcp` with the absolute path to where you cloned this repository
+   - `~/path/to/nova-act-mcp` with the absolute path to where you cloned this repository
    - `your_api_key_here` with your actual Nova Act API key
 
 4. Save the file and restart Claude Desktop
@@ -446,3 +447,7 @@ To update or add dependencies:
 3. Commit both the modified `pyproject.toml` and the updated `uv.lock` file to the repository.
 
 This ensures that all developers and users have consistent dependency versions.
+
+## Future Enhancements
+
+- **Improve Profile Persistence**: Enhance the handling of browser profiles to ensure reliable session persistence (logins, cookies) across multiple uses, leveraging Nova Act's underlying support more effectively.
