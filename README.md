@@ -32,7 +32,7 @@ This project exposes Nova Act's powerful browser automation capabilities through
 
 1. Control web browsers directly from AI assistants
 2. Execute interactive browser automation tasks
-3. Maintain browser sessions between interactions
+3. Persist cookies and local storage between interactions (profile data is reused), noting that each `execute` spawns a fresh browser context so in-page state or filled forms will not carry over unless combined into a single instruction
 4. See the agent's step-by-step reasoning process
 
 ## Prerequisites
@@ -169,15 +169,13 @@ Instead of trying to do everything at once, break it down into interactive steps
 
 ## Advanced Features
 
-### Persistent Browser Sessions
+### Persistent Browser Profiles
 
-The nova-act-mcp server maintains browser profiles in the `profiles/` directory, allowing you to:
+The nova-act-mcp server maintains a separate profile directory for each session under `profiles/{session_id}`, reusing that profile on every `execute`. This ensures:
+- Cookies, login tokens, and local storage persist between calls
+- Profile isolation per session ID
 
-- Maintain login sessions between uses
-- Keep cookies and local storage data
-- Resume workflows in later conversations
-
-Each profile is isolated, so you can maintain different identities or login states.
+**Note:** Each `execute` command launches a new browser context on the same profile to pick up cookies/storage. In-page state (e.g. form fields, DOM changes) will not persist across separate `execute` calls. To preserve multi-step page state, combine your steps into a single `execute` instruction.
 
 ### Browser Session Management
 
@@ -408,4 +406,5 @@ This ensures that all developers and users have consistent dependency versions.
 
 ## Future Enhancements
 
-- **Improve Profile Persistence**: Enhance the handling of browser profiles to ensure reliable session persistence (logins, cookies) across multiple uses, leveraging Nova Act's underlying support more effectively.
+- **Multi-Step Session State**: Support true in-page session persistence across multiple `execute` calls so that form inputs and DOM changes remain live between commands.
+- **Improve Profile Persistence**: Enhance handling of profiles for even more reliable cookie and storage reuse.
