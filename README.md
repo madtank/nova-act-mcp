@@ -32,9 +32,8 @@ This project exposes Nova Act's powerful browser automation capabilities through
 
 1. Control web browsers directly from AI assistants
 2. Execute interactive browser automation tasks
-3. Extract structured data from web pages
-4. Maintain browser sessions between interactions 
-5. See the agent's step-by-step reasoning process
+3. Persist cookies and local storage between interactions (profile data is reused), noting that each `execute` spawns a fresh browser context so in-page state or filled forms will not carry over unless combined into a single instruction
+4. See the agent's step-by-step reasoning process
 
 ## Prerequisites
 
@@ -170,15 +169,13 @@ Instead of trying to do everything at once, break it down into interactive steps
 
 ## Advanced Features
 
-### Persistent Browser Sessions
+### Persistent Browser Profiles
 
-The nova-act-mcp server maintains browser profiles in the `profiles/` directory, allowing you to:
+The nova-act-mcp server maintains a separate profile directory for each session under `profiles/{session_id}`, reusing that profile on every `execute`. This ensures:
+- Cookies, login tokens, and local storage persist between calls
+- Profile isolation per session ID
 
-- Maintain login sessions between uses
-- Keep cookies and local storage data
-- Resume workflows in later conversations
-
-Each profile is isolated, so you can maintain different identities or login states.
+**Note:** Each `execute` command launches a new browser context on the same profile to pick up cookies/storage. In-page state (e.g. form fields, DOM changes) will not persist across separate `execute` calls. To preserve multi-step page state, combine your steps into a single `execute` instruction.
 
 ### Browser Session Management
 
@@ -186,8 +183,7 @@ The following actions are available for browser session management:
 
 1. **start** - Starts a new browser session with a specified URL
 2. **execute** - Executes a natural language instruction in the current session
-3. **extract** - Extracts structured data from the current web page
-4. **end** - Ends the current browser session and cleans up resources
+3. **end** - Ends the current browser session and cleans up resources
 
 Example flow:
 ```
@@ -198,43 +194,9 @@ start: https://www.google.com
 execute: search for news
 execute: click on the first result
 
-# Extract specific data
-extract: Extract all news headlines from the page
-
 # End the session
 end
 ```
-
-### Data Extraction
-
-![Nova Act Extract News](assets/nova-act-extract-news.png)
-
-The extract action allows you to scrape and structure data from web pages using natural language queries. This is particularly useful for:
-
-- Collecting news headlines from news sites
-- Extracting product information from e-commerce pages
-- Gathering data from tables and lists
-- Compiling search results information
-
-To use the extract feature:
-
-1. Start a browser session
-2. Navigate to the page containing data you want to extract
-3. Use the extract action with a specific query describing what to extract
-
-Example:
-```
-# Extract news headlines
-extract: Extract all news headlines from the page
-
-# Extract product information
-extract: Extract the prices and names of all products on this page
-
-# Extract structured data from a table
-extract: Extract the table data as a JSON array with headers
-```
-
-The extract feature returns structured data that can be further processed or analyzed.
 
 ## Example Use Cases
 
@@ -245,14 +207,12 @@ Here are some more complex tasks you can accomplish using nova-act-mcp:
 ```
 1. Start a session on amazon.com
 2. Execute "search for wireless earbuds"
-3. Extract "Get prices and ratings of the top 5 results"
-4. Execute "go back to search results"
-5. Execute "filter by brands: Sony, Bose"
-6. Extract "Compare prices of Sony vs Bose earbuds"
-7. Start a new session on bestbuy.com
-8. Execute "search for the same Sony model found on Amazon"
-9. Extract "Get the price and availability"
-10. Execute "find price match policy"
+3. Execute "go back to search results"
+4. Execute "filter by brands: Sony, Bose"
+5. Execute "Compare prices of Sony vs Bose earbuds"
+6. Start a new session on bestbuy.com
+7. Execute "search for the same Sony model found on Amazon"
+8. Execute "find price match policy"
 ```
 
 ### Research and Data Collection
@@ -261,11 +221,9 @@ Here are some more complex tasks you can accomplish using nova-act-mcp:
 1. Start a session on scholar.google.com
 2. Execute "search for 'large language models applications 2023'"
 3. Execute "filter by last year"
-4. Extract "Get titles, authors and citation counts of the top 10 papers"
-5. Execute "click on the most cited paper"
-6. Extract "Summarize the abstract and key findings"
-7. Execute "find and list the references section"
-8. Extract "Identify the most frequently cited authors in the references"
+4. Execute "click on the most cited paper"
+5. Execute "find and list the references section"
+6. Execute "Identify the most frequently cited authors in the references"
 ```
 
 ### Travel Planning
@@ -274,13 +232,11 @@ Here are some more complex tasks you can accomplish using nova-act-mcp:
 1. Start a session on kayak.com
 2. Execute "search for flights from San Francisco to Tokyo in October"
 3. Execute "filter for direct flights only"
-4. Extract "Find the cheapest direct flight options"
-5. Execute "select the cheapest flight"
-6. Start a new session on hotels.com
-7. Execute "search for hotels in Tokyo near Shinjuku station"
-8. Execute "filter by 4+ stars and under $200 per night"
-9. Extract "List the top 3 options with their amenities and reviews"
-10. Execute "check availability for October 10-17"
+4. Execute "select the cheapest flight"
+5. Start a new session on hotels.com
+6. Execute "search for hotels in Tokyo near Shinjuku station"
+7. Execute "filter by 4+ stars and under $200 per night"
+8. Execute "check availability for October 10-17"
 ```
 
 ## Performance Considerations
@@ -450,4 +406,5 @@ This ensures that all developers and users have consistent dependency versions.
 
 ## Future Enhancements
 
-- **Improve Profile Persistence**: Enhance the handling of browser profiles to ensure reliable session persistence (logins, cookies) across multiple uses, leveraging Nova Act's underlying support more effectively.
+- **Multi-Step Session State**: Support true in-page session persistence across multiple `execute` calls so that form inputs and DOM changes remain live between commands.
+- **Improve Profile Persistence**: Enhance handling of profiles for even more reliable cookie and storage reuse.
