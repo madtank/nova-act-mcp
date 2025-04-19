@@ -453,5 +453,5 @@ This ensures that all developers and users have consistent dependency versions.
 
 ## Future Enhancements
 
-- **Multi-Step Session State**: Support true in-page session persistence across multiple `execute` calls so that form inputs and DOM changes remain live between commands.
+- [x] **Multi-Step Session State**: Support true in-page session persistence across multiple `execute` calls so that form inputs and DOM changes remain live between commands.
 - **Improve Profile Persistence**: Enhance handling of profiles for even more reliable cookie and storage reuse.
