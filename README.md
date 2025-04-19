@@ -177,7 +177,7 @@ The nova-act-mcp server maintains a separate profile directory for each session 
 
 **Note:** Each `execute` command launches a new browser context on the same profile to pick up cookies/storage. In-page state (e.g. form fields, DOM changes) will not persist across separate `execute` calls. To preserve multi-step page state, combine your steps into a single `execute` instruction.
 
-### Browser Session Management
+### Browser Session Management and Persistence
 
 The following actions are available for browser session management:
 
@@ -197,6 +197,22 @@ execute: click on the first result
 # End the session
 end
 ```
+
+#### Important: Browser Persistence
+
+The browser launched during a `start` action remains open throughout the session lifecycle:
+
+- The same browser instance is reused for all `execute` commands within a session
+- Each browser runs in its own dedicated thread to ensure thread safety
+- The browser continues running in the background between commands, maintaining its state
+- **Browser windows are only closed when:**
+  - You explicitly call the `end` action for a session
+  - The nova-act-mcp server process exits (using a cleanup mechanism)
+  - Sessions are automatically cleaned up after 10 minutes of inactivity
+
+**Warning:** If you don't properly end sessions with the `end` action, browser instances may continue running in the background, consuming system resources. Always make sure to end your sessions when you're done using them.
+
+To check for and close any lingering sessions, you can use the `list_browser_sessions` tool to identify active sessions, then call `end` on any sessions you no longer need.
 
 ## Example Use Cases
 
@@ -260,6 +276,8 @@ When working with browser automation at scale, keep these performance considerat
 
 - **Session Reuse**: Where appropriate, reuse browser sessions instead of creating new ones.
 - **Cleanup**: Always end sessions properly when done to free up system resources.
+- **Explicit Session Ending**: Always call the `end` action when you're done with a session to prevent resource leaks.
+- **Session Monitoring**: Periodically check for active sessions using `list_browser_sessions` to ensure proper cleanup.
 - **Batching**: Group related tasks into batches to minimize the overhead of session creation.
 - **Error Handling**: Implement robust error handling with automatic retries for transient failures.
 
@@ -313,6 +331,15 @@ If the browser is not behaving as expected:
 1. Check the agent_thinking field in the response to see how the agent is interpreting your instructions
 2. Make your instructions more specific and actionable
 3. For tasks involving forms or logins, be explicit about field names
+
+### Lingering Browser Windows
+
+If you notice browser windows staying open after you're done using the tool:
+
+1. Make sure you always call the `end` action when you're finished with a session
+2. Use `list_browser_sessions` to check for any active sessions that need to be closed
+3. Restart the MCP server if needed to force cleanup of all browser sessions
+4. Check your system's task manager for any lingering browser processes
 
 ### Debug Mode
 

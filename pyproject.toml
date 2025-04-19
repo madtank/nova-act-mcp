@@ -1,6 +1,6 @@
 [project]
 name = "nova-act-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "An MCP server providing tools to control web browsers using the Amazon Nova Act SDK"
 authors = [
     {name = "Jacob Taunton", email = "jandrewt82@gmail.com"}
@@ -10,10 +10,10 @@ license = "MIT"  # Changed from table format to simple string
 requires-python = ">=3.10"
 dependencies = [
     "httpx>=0.28.1",
-    "mcp>=1.6.0",
+    "mcp>=1.6.0",  # Reverted to the available version
     "pydantic>=2.0.0",
-    "nova-act",  # This will install from PyPI
-    "playwright>=1.40.0",  # Explicit playwright dependency for browser automation
+    "nova-act>=0.7.5",  # Added specific version constraint for latest Nova Act
+    "playwright>=1.42.0",  # Updated to latest Playwright version
     "asyncio-extras>=1.3.2",  # Helpful utilities for working with asyncio
     "rich>=13.7.0",  # Better terminal output and logging
     "structlog>=24.1.0",  # Structured logging
