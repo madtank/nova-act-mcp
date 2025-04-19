@@ -220,9 +220,11 @@ Here are some practical developer-focused tasks you can accomplish using nova-ac
 
 ### On-Call Response Automation
 
+This example shows how an AI system could automatically respond to alerts by investigating your internal systems:
+
 ```
 1. Start a session on our-monitoring-dashboard.company.com
-2. Execute "login with my SSO credentials"
+2. Execute "authenticate using system credentials"
 3. Execute "check the status of the payment processing service"
 4. Execute "take a screenshot of the error metrics graph"
 5. Execute "navigate to the database connection panel"
