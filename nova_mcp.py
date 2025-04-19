@@ -10,7 +10,8 @@ import tempfile
 import threading
 import time
 import traceback
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Literal
 
 # Third-party imports
 from pydantic import BaseModel
@@ -30,8 +31,8 @@ MAX_RETRY_ATTEMPTS = 2  # Maximum retry attempts for failed steps
 PROFILES_DIR = "./profiles"
 DEFAULT_PROFILE = "default"  # Default profile name to use
 
-# Global browser session registry
-active_sessions = {}
+# Global browser session registry - add type hint for clarity
+active_sessions: Dict[str, Dict[str, Any]] = {}
 session_lock = threading.Lock()
 
 # Global variable to track if logging is initialized
@@ -44,8 +45,19 @@ NOVA_ACT_API_KEY = None
 NOVA_ACT_AVAILABLE = False
 try:
     from nova_act import NovaAct
+    # Import error classes for specific error handling
+    try:
+        from nova_act import ActError
+        from nova_act.types.act_errors import ActGuardrailsError
+    except ImportError:
+        # Define dummy exceptions if SDK not installed with these classes
+        class ActError(Exception): pass
+        class ActGuardrailsError(Exception): pass
     NOVA_ACT_AVAILABLE = True
 except ImportError:
+    # Define dummy exceptions if SDK not installed
+    class ActError(Exception): pass
+    class ActGuardrailsError(Exception): pass
     pass
 
 # Utility function to log to stderr instead of stdout
@@ -57,7 +69,40 @@ def log(message):
 # Clean up function to ensure all browser sessions are closed on exit
 def cleanup_browser_sessions():
     log("Cleaning up browser sessions...")
-    # No need to manually close NovaAct instances - they should be handled by context managers
+    with session_lock:
+        sessions_to_close = list(active_sessions.items())
+    
+    for session_id, session_data in sessions_to_close:
+        nova_instance = session_data.get("nova_instance")
+        executor = session_data.get("executor")
+        
+        if (nova_instance):
+            log(f"Attempting to close lingering session: {session_id}")
+            try:
+                # Try to properly close the NovaAct instance
+                if hasattr(nova_instance, 'close') and callable(nova_instance.close):
+                    nova_instance.close()
+                    log(f"Closed instance for session {session_id}")
+                elif hasattr(nova_instance, '__exit__') and callable(nova_instance.__exit__):
+                    # Fallback to context manager exit if no close method
+                    nova_instance.__exit__(None, None, None)
+                    log(f"Called __exit__ for session {session_id}")
+                else:
+                    log(f"Warning: No close() or __exit__ method found on NovaAct instance for session {session_id}. Browser might remain open.")
+            except Exception as e:
+                log(f"Error closing session {session_id} during cleanup: {e}")
+        
+        # Shutdown the executor if it exists
+        if executor:
+            try:
+                executor.shutdown(wait=False)
+                log(f"Shutdown executor for session {session_id}")
+            except Exception:
+                pass
+                
+        # Remove from registry after attempting close
+        with session_lock:
+            active_sessions.pop(session_id, None)
 
 # Register the cleanup function to run on exit
 atexit.register(cleanup_browser_sessions)
@@ -319,6 +364,27 @@ async def list_browser_sessions() -> str:
             # Only clean up sessions that are marked complete and are old
             if session_data.get("complete", False) and (current_time - session_data.get("last_updated", 0) > 600):
                 log(f"Cleaning up old completed session {session_id}")
+                
+                # Close NovaAct instance if present
+                nova_instance = session_data.get("nova_instance")
+                if nova_instance:
+                    try:
+                        if hasattr(nova_instance, 'close') and callable(nova_instance.close):
+                            nova_instance.close()
+                        elif hasattr(nova_instance, '__exit__') and callable(nova_instance.__exit__):
+                            nova_instance.__exit__(None, None, None)
+                    except Exception as e:
+                        log(f"Error closing NovaAct during cleanup: {e}")
+                
+                # Shutdown the executor if it exists
+                executor = session_data.get("executor")
+                if executor:
+                    try:
+                        executor.shutdown(wait=False)
+                        log(f"Shutdown executor for old session {session_id}")
+                    except Exception:
+                        pass
+                
                 active_sessions.pop(session_id, None)
     
     result = {
@@ -334,10 +400,23 @@ async def list_browser_sessions() -> str:
 
 
 @mcp.tool(name="control_browser", description="Control a web browser session via Nova Act agent in multiple steps: start, execute, and end sessions.")
-async def browser_session(action: str, session_id: Optional[str] = None, url: Optional[str] = None, instruction: Optional[str] = None, headless: Optional[bool] = True) -> str:
+async def browser_session(
+    action: Literal["start", "execute", "end"] = "execute",
+    session_id: Optional[str] = None,
+    url: Optional[str] = None,
+    instruction: Optional[str] = None,
+    headless: bool = True,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    embedScreenshot: Optional[bool] = False,
+    schema: Optional[dict] = None,
+    debug: Optional[bool] = False
+) -> str:
     """Control a web browser session via Nova Act agent.
 
     Perform actions in multiple steps: start a session, execute navigation or agent instructions, and end a session.
+
+    If action == "execute" and no session_id is supplied, a new headless session is started automatically.
 
     Args:
         action: One of "start", "execute", or "end".
@@ -345,6 +424,11 @@ async def browser_session(action: str, session_id: Optional[str] = None, url: Op
         url: Initial or navigation URL.
         instruction: Instruction text for navigation actions ("execute").
         headless: Run browser in headless mode when starting.
+        username: Username text typed directly with Playwright (optional).
+        password: Password text typed directly with Playwright (optional).
+        embedScreenshot: If true, include a saved PNG path in the payload.
+        schema:      Optional JSON schema forwarded to nova.act().
+        debug:       If true, include extra debug keys in the result.
 
     Returns:
         JSON string with action result and session status.
@@ -408,49 +492,93 @@ async def browser_session(action: str, session_id: Optional[str] = None, url: Op
                 "steps": [],
                 "results": [],
                 "last_updated": time.time(),
-                "complete": False
+                "complete": False,
+                "nova_instance": None,  # Will store the NovaAct instance
+                "executor": None        # Single-thread executor for this session
             }
+        
+        # Create a dedicated single-thread executor – NovaAct is not thread-safe.
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        with session_lock:
+            active_sessions[session_id]["executor"] = executor
         
         # Define a synchronous function to run in a separate thread
         def start_browser_session():
+            nova_instance = None
             try:
                 profile_dir = os.path.join(PROFILES_DIR, DEFAULT_PROFILE)
                 os.makedirs(profile_dir, exist_ok=True)
                 
-                log(f"Opening browser to {url}")
+                log(f"[{session_id}] Opening browser to {url}")
                 
-                # Create NovaAct instance with context manager to ensure proper closure
-                with NovaAct(
+                # Create NovaAct instance directly (not using context manager)
+                nova_instance = NovaAct(
                     starting_page=url,
                     nova_act_api_key=api_key,
                     user_data_dir=profile_dir,
                     headless=headless
-                ) as nova:
-                    # Store NovaAct's own session ID for debugging
-                    nova_session_id = None
-                    if hasattr(nova, 'session_id'):
-                        nova_session_id = nova.session_id
-                        log_session_info("NovaAct session started", session_id, nova_session_id)
-                    
-                    # Take a screenshot
-                    screenshot_data = None
-                    try:
-                        screenshot_bytes = nova.page.screenshot()
-                        screenshot_data = base64.b64encode(screenshot_bytes).decode('utf-8')
-                    except Exception as e:
-                        log(f"Error taking screenshot: {str(e)}")
-                    
-                    # Get initial page info
-                    current_url = nova.page.url
-                    page_title = nova.page.title()
+                )
                 
-                # Update session registry with results
+                # --- Explicitly start the client - THIS FIXES THE ERROR ---
+                log(f"[{session_id}] Calling nova_instance.start()...")
+                if hasattr(nova_instance, 'start') and callable(nova_instance.start):
+                    nova_instance.start()
+                    log(f"[{session_id}] nova_instance.start() completed.")
+                else:
+                    # This case should ideally not happen based on docs/error
+                    log(f"[{session_id}] Warning: nova_instance does not have a callable start() method!")
+                
+                # Now it should be safe to access nova_instance.page
+                log(f"[{session_id}] Accessing page properties...")
+                
+                # Wait for initial page to load
+                try:
+                    nova_instance.page.wait_for_load_state('domcontentloaded', timeout=15000)
+                except Exception as wait_e:
+                    log(f"[{session_id}] Info: Initial page wait timed out or errored: {wait_e}")
+                
+                # Store NovaAct's own session ID for debugging
+                nova_session_id = None
+                if hasattr(nova_instance, 'session_id'):
+                    nova_session_id = nova_instance.session_id
+                    log_session_info("NovaAct session started", session_id, nova_session_id)
+                
+                # Take a screenshot
+                screenshot_data = None
+                try:
+                    screenshot_bytes = nova_instance.page.screenshot()
+                    screenshot_data = base64.b64encode(screenshot_bytes).decode('utf-8')
+                except Exception as e:
+                    log(f"Error taking screenshot: {str(e)}")
+                
+                # Get initial page info
+                current_url = nova_instance.page.url
+                page_title = nova_instance.page.title()
+                log(f"[{session_id}] Browser ready at URL: {current_url}")
+                
+                # Update session registry with results and store the nova instance
                 with session_lock:
                     if session_id in active_sessions:
                         active_sessions[session_id]["status"] = "browser_ready"
                         active_sessions[session_id]["url"] = current_url
+                        active_sessions[session_id]["nova_instance"] = nova_instance
+                        active_sessions[session_id]["last_updated"] = time.time()
+                        active_sessions[session_id]["error"] = None  # Clear previous error
                         if nova_session_id:
                             active_sessions[session_id]["nova_session_id"] = nova_session_id
+                    else:
+                        # Session might have been cancelled/ended externally
+                        log(f"[{session_id}] Warning: Session disappeared before instance could be stored.")
+                        # Need to clean up the instance we just created
+                        if nova_instance:
+                            try:
+                                if hasattr(nova_instance, 'close') and callable(nova_instance.close): 
+                                    nova_instance.close()
+                                elif hasattr(nova_instance, '__exit__'): 
+                                    nova_instance.__exit__(None, None, None)
+                            except Exception:
+                                pass  # Avoid errors during cleanup
+                        return None  # Indicate failure to store
                 
                 # Create result formatted for JSON-RPC
                 result = {
@@ -465,33 +593,41 @@ async def browser_session(action: str, session_id: Optional[str] = None, url: Op
             except Exception as e:
                 error_message = str(e)
                 error_tb = traceback.format_exc()
-                log(f"Error starting browser session: {error_message}")
+                log(f"[{session_id}] Error during start_browser_session: {error_message}")
                 log(f"Traceback: {error_tb}")
                 
-                # Update progress context with the error
-                progress_context["error"] = error_message
-                progress_context["current_action"] = f"Error: {error_message[:100]}..."
+                # Clean up the instance if it was partially created
+                if nova_instance:
+                    try:
+                        log(f"[{session_id}] Attempting cleanup after error...")
+                        if hasattr(nova_instance, 'close') and callable(nova_instance.close):
+                            nova_instance.close()
+                        elif hasattr(nova_instance, '__exit__'):
+                            nova_instance.__exit__(None, None, None)
+                    except Exception as cleanup_e:
+                        log(f"[{session_id}] Error during cleanup after failed start: {cleanup_e}")
                 
                 # Update session registry with error
                 with session_lock:
                     if session_id in active_sessions:
                         active_sessions[session_id]["status"] = "error"
                         active_sessions[session_id]["error"] = error_message
+                        active_sessions[session_id]["nova_instance"] = None  # Ensure no broken instance is stored
+                        active_sessions[session_id]["last_updated"] = time.time()
                 
                 # Return the error in JSON-RPC format
-                raise Exception(error_message)
+                raise Exception(f"Error starting browser session: {error_message}")
         
-        # Run the synchronous code in a thread pool
+        # Run the synchronous code in the session's dedicated thread
         try:
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                # Use run_in_executor to run the synchronous code in a separate thread
-                result = await asyncio.get_event_loop().run_in_executor(
-                    executor, start_browser_session
-                )
+            # Use run_in_executor to run the synchronous code in the session's thread
+            result = await asyncio.get_event_loop().run_in_executor(
+                executor, start_browser_session
+            )
+            
+            # Return the result as a proper JSON-RPC response
+            return create_jsonrpc_response(request_id, result)
                 
-                # Return the result as a proper JSON-RPC response
-                return create_jsonrpc_response(request_id, result)
-                    
         except Exception as e:
             error_message = str(e)
             error_tb = traceback.format_exc()
@@ -511,167 +647,273 @@ async def browser_session(action: str, session_id: Optional[str] = None, url: Op
 
     # Handle the "execute" action
     elif action == "execute":
-        if not session_id or not instruction:
-            error = {
-                "code": -32602,
-                "message": "session_id and instruction are required for 'execute' action.",
-                "data": None
-            }
+        # Require session_id for execute (no longer auto-starting)
+        if not session_id:
+            error = {"code": -32602, "message": "session_id is required for 'execute' action. Please 'start' a session first.", "data": None}
+            return create_jsonrpc_response(request_id, error=error)
+            
+        # Require instruction or credentials for execution
+        if not instruction and not (username or password or schema):
+            error = {"code": -32602, "message": "instruction, schema, or credentials are required for 'execute' action.", "data": None}
             return create_jsonrpc_response(request_id, error=error)
         
-        # Get the session data
+        # Get the session data and the NovaAct instance
         with session_lock:
             session_data = active_sessions.get(session_id)
         
-        if not session_data:
+        if not session_data or session_data.get("status") == "ended":
             error = {
                 "code": -32602,
-                "message": f"No active session found with session_id: {session_id}",
+                "message": f"No active session found or session ended: {session_id}",
                 "data": None
             }
             return create_jsonrpc_response(request_id, error=error)
         
-        # Get the URL from the session or use the provided URL
-        current_url = url if url else session_data.get("url")
-        if not current_url:
+        # Get the NovaAct instance and session's dedicated executor
+        nova_instance = session_data.get("nova_instance")
+        executor = session_data.get("executor")
+        
+        if not nova_instance:
             error = {
-                "code": -32602,
-                "message": f"No URL found for session. Please provide a URL.",
+                "code": -32603, 
+                "message": f"NovaAct instance missing for session: {session_id}",
                 "data": None
             }
             return create_jsonrpc_response(request_id, error=error)
             
+        if executor is None:
+            error = {
+                "code": -32603,
+                "message": "Internal error – executor missing for session.",
+                "data": {"session_id": session_id},
+            }
+            return create_jsonrpc_response(request_id, error=error)
+        
         # Define a synchronous function to run in a separate thread
         def execute_instruction():
+            original_instruction = instruction  # Keep original for logging/reporting
+            instruction_to_execute = instruction  # This one might be modified
+            output_html_paths = []  # Keep track of HTML output paths
+            action_handled_directly = False  # Flag to track if we used Playwright directly
+        
             try:
-                # Create a new instance each time for execute
-                profile_dir = os.path.join(PROFILES_DIR, DEFAULT_PROFILE)
-                log(f"Creating new NovaAct instance for execute with URL: {current_url}")
-                
-                # Track HTML output paths
-                output_html_paths = []
-                
-                # Create and initialize NovaAct for this specific action
-                with NovaAct(
-                    starting_page=current_url,
-                    nova_act_api_key=api_key,
-                    user_data_dir=profile_dir,
-                    headless=False  # Show the browser for execute commands
-                ) as nova:
-                    # Wait for the page to load
-                    log(f"Executing instruction: Wait for the page to fully load")
-                    load_result = nova.act("Wait for the page to fully load", timeout=30)
-                    
-                    # Capture HTML output path from load action if available
-                    if hasattr(load_result, 'metadata') and load_result.metadata:
-                        # Look for HTML output path in logs
-                        nova_session_id = load_result.metadata.session_id
-                        nova_act_id = load_result.metadata.act_id
-                        logs_dir = nova.logs_directory if hasattr(nova, 'logs_directory') else None
-                        
-                        # Check for standard Nova Act output path pattern
-                        if logs_dir and nova_session_id and nova_act_id:
-                            possible_html_path = os.path.join(
-                                logs_dir, 
-                                nova_session_id, 
-                                f"act_{nova_act_id}_output.html"
-                            )
-                            if os.path.exists(possible_html_path):
-                                output_html_paths.append(possible_html_path)
-                    
-                    # Execute the instruction
-                    log(f"Executing instruction: {instruction}")
-                    result = nova.act(instruction, timeout=DEFAULT_TIMEOUT)
-                    
-                    # Get the updated URL after the action
-                    updated_url = nova.page.url
-                    page_title = nova.page.title()
-                    
-                    # Extract the response properly
-                    response_content = None
-                    if hasattr(result, 'response') and result.response is not None:
-                        if isinstance(result.response, str):
-                            response_content = result.response
-                        elif isinstance(result.response, dict):
-                            response_content = result.response
-                        elif hasattr(result.response, '__dict__'):
-                            try:
-                                response_content = result.response.__dict__
-                            except:
-                                response_content = str(result.response)
+                # If a URL is provided for execute, navigate first
+                current_url = session_data.get("url")
+                if url and nova_instance.page.url != url:
+                    log(f"[{session_id}] Navigating to execute URL: {url}")
+                    try:
+                        # Use the SDK's navigation if available, otherwise use page.goto
+                        if hasattr(nova_instance, 'go_to_url'):
+                            nova_instance.go_to_url(url)  # Use SDK's method per docs
                         else:
-                            try:
-                                json.dumps(result.response)
-                                response_content = result.response
-                            except:
-                                response_content = str(result.response)
-                    else:
-                        response_content = f"Page title: {page_title}, URL: {updated_url}"
-                    
-                    # Look for the output HTML file in the logs
-                    # Extract logs from Nova Act and find the HTML output path
-                    html_output_path = None
-                    if hasattr(result, 'metadata') and result.metadata:
-                        nova_session_id = result.metadata.session_id
-                        nova_act_id = result.metadata.act_id
-                        
-                        # Try to get the HTML output path
-                        # First check if nova has logs_directory attribute
-                        logs_dir = nova.logs_directory if hasattr(nova, 'logs_directory') else None
-                        
-                        if logs_dir and nova_session_id and nova_act_id:
-                            possible_html_path = os.path.join(
-                                logs_dir, 
-                                nova_session_id, 
-                                f"act_{nova_act_id}_output.html"
+                            nova_instance.page.goto(url, wait_until='domcontentloaded', timeout=60000)
+                        current_url = url
+                        log(f"[{session_id}] Navigation complete.")
+                    except Exception as nav_e:
+                        raise Exception(f"Failed to navigate to execute URL {url}: {nav_e}")
+                
+                # Optional credential typing
+                if username or password:
+                    try:
+                        log(f"[{session_id}] Handling credentials...")
+                        # Prefer explicit selectors
+                        if username:
+                            nova_instance.page.fill(
+                                "input#username, input[name='username'], input[type='text'], input[name*='user']",
+                                username,
+                                timeout=5000
                             )
-                            if os.path.exists(possible_html_path):
-                                html_output_path = possible_html_path
-                                output_html_paths.append(html_output_path)
-                                log(f"Found HTML output path: {html_output_path}")
-                        
-                        # If logs_directory is not set, try to find HTML in temp directory
-                        if not logs_dir or not html_output_path:
-                            # Check in temp directory using session ID and act ID
-                            temp_dir = tempfile.gettempdir()
-                            log(f"Searching for HTML output in temp directory: {temp_dir}")
-                            
-                            for root, dirs, files in os.walk(temp_dir):
-                                if nova_session_id in root:
-                                    for file in files:
-                                        if file.startswith(f"act_{nova_act_id}") and file.endswith("_output.html"):
-                                            html_output_path = os.path.join(root, file)
-                                            output_html_paths.append(html_output_path)
-                                            log(f"Found HTML output path in temp dir: {html_output_path}")
-                                            break
-                    
-                    # Use the new extraction function to get agent thinking
-                    agent_messages, debug_info = extract_agent_thinking(
-                        result, 
-                        nova, 
-                        logs_dir if 'logs_dir' in locals() else None,
-                        instruction
+                        if password:
+                            nova_instance.page.fill(
+                                "input#password, input[name='password'], input[type='password']",
+                                password,
+                                timeout=5000
+                            )
+                    except Exception:
+                        log(f"[{session_id}] Falling back to focus/type for credentials")
+                        # Fallback: focus + type
+                        if username:
+                            nova_instance.act("focus the username field")
+                            nova_instance.page.keyboard.type(username)
+                        if password:
+                            nova_instance.act("focus the password field")
+                            nova_instance.page.keyboard.type(password)
+
+                    if not original_instruction:  # Auto-click Login if no other instruction
+                        log(f"[{session_id}] Auto-clicking login after credentials.")
+                        instruction_to_execute = "click the Login button"  # Set instruction
+                        original_instruction = "[Auto-Login]"  # For reporting
+                    else:
+                        # Sanitize the instruction that WILL be executed
+                        log(f"[{session_id}] Sanitizing instruction after credential input.")
+                        safe_instruction = original_instruction
+                        if username:
+                            safe_instruction = safe_instruction.replace(username, "«username»")
+                        if password:
+                            safe_instruction = safe_instruction.replace(password, "«password»")
+                        safe_instruction = re.sub(r"(?i)password", "••••••", safe_instruction)
+                        instruction_to_execute = safe_instruction
+                
+                # --- Direct Playwright Action Interpretation ---
+                # Example: Look for "Type 'text' into 'selector'" pattern
+                type_match = re.match(r"^\s*Type\s+['\"](.*)['\"]\s+into\s+element\s+['\"](.*)['\"]\s*$",
+                                      original_instruction or "", re.IGNORECASE)
+
+                if type_match:
+                    text_to_type = type_match.group(1)
+                    element_selector = type_match.group(2)
+                    log(f"[{session_id}] Handling instruction directly: Typing '{text_to_type}' into '{element_selector}'")
+                    try:
+                        # Use page.fill which is often better for inputs
+                        nova_instance.page.fill(element_selector, text_to_type, timeout=10000)
+                        # Alternatively, use type:
+                        # nova_instance.page.locator(element_selector).type(text_to_type, delay=50, timeout=10000)
+                        log(f"[{session_id}] Direct fill successful.")
+                        action_handled_directly = True
+                        result = None  # No result object from nova.act needed
+                        response_content = f"Successfully typed text into '{element_selector}' using direct Playwright call."
+
+                    except Exception as direct_e:
+                        log(f"[{session_id}] Error during direct Playwright fill/type: {direct_e}")
+                        raise Exception(f"Failed direct Playwright action: {direct_e}")  # Propagate error
+                
+                # --- Look for "Click element 'selector'" pattern ---
+                elif re.match(r"^\s*Click\s+element\s+['\"](.*)['\"]\s*$", original_instruction or "", re.IGNORECASE):
+                    element_selector = re.match(r"^\s*Click\s+element\s+['\"](.*)['\"]\s*$", original_instruction, re.IGNORECASE).group(1)
+                    log(f"[{session_id}] Handling click directly: Clicking element '{element_selector}'")
+                    try:
+                        nova_instance.page.click(element_selector, timeout=10000)
+                        log(f"[{session_id}] Direct click successful.")
+                        action_handled_directly = True
+                        result = None
+                        response_content = f"Successfully clicked element '{element_selector}' using direct Playwright call."
+                    except Exception as direct_e:
+                        log(f"[{session_id}] Error during direct Playwright click: {direct_e}")
+                        raise Exception(f"Failed direct Playwright click: {direct_e}")
+                
+                # --- If not handled directly, try using nova.act (as fallback/default) ---
+                elif instruction_to_execute or schema:
+                    log(f"[{session_id}] Passing instruction to nova.act: {instruction_to_execute}")
+                    result = nova_instance.act(
+                        instruction_to_execute or "Observe the page and respond based on the schema.",
+                        timeout=DEFAULT_TIMEOUT,
+                        schema=schema  # Pass schema if provided
                     )
                     
-                    # Take a screenshot
-                    screenshot_data = None
+                    # Extract the response properly
+                    if result and hasattr(result, 'response') and result.response is not None:
+                        # Handle different response types (string, dict, object)
+                        if isinstance(result.response, (str, dict, list, int, float, bool)):
+                            response_content = result.response
+                        elif hasattr(result.response, '__dict__'):
+                            try: 
+                                response_content = result.response.__dict__
+                            except: 
+                                response_content = str(result.response)
+                        else:
+                            try:  # Check if serializable
+                                json.dumps(result.response)
+                                response_content = result.response
+                            except: 
+                                response_content = str(result.response)
+                    elif result and hasattr(result, 'matches_schema') and result.matches_schema and hasattr(result, 'parsed_response'):
+                        # Prioritize parsed schema response if available
+                        response_content = result.parsed_response
+                    else:
+                        # Get the updated URL after the action
+                        updated_url = nova_instance.page.url
+                        page_title = nova_instance.page.title()
+                        # Fallback if no specific response
+                        response_content = f"Action executed. Page title: {page_title}, URL: {updated_url}"
+                else:
+                    # No instruction provided, and not handled directly (e.g., just credentials entered)
+                    log(f"[{session_id}] No specific instruction to execute via nova.act.")
+                    result = None
+                    # Get the current page state
+                    updated_url = nova_instance.page.url
+                    page_title = nova_instance.page.title()
+                    response_content = f"No explicit instruction executed. Current state - URL: {updated_url}, Title: {page_title}"
+                
+                # --- Post-Action Steps (State Update, Screenshot, etc.) ---
+                # Get updated page state AFTER the action
+                updated_url = nova_instance.page.url
+                page_title = nova_instance.page.title()
+                log(f"[{session_id}] Action completed. Current URL: {updated_url}")
+                
+                # Look for the output HTML file in the logs (only if we used nova.act)
+                html_output_path = None
+                if result and hasattr(result, 'metadata') and result.metadata:
+                    # ... existing HTML path extraction code ...
+                    nova_session_id = result.metadata.session_id
+                    nova_act_id = result.metadata.act_id
+                    
+                    # Try to get the HTML output path
+                    logs_dir = nova_instance.logs_directory if hasattr(nova_instance, 'logs_directory') else None
+                    
+                    if logs_dir and nova_session_id and nova_act_id:
+                        possible_html_path = os.path.join(
+                            logs_dir, 
+                            nova_session_id, 
+                            f"act_{nova_act_id}_output.html"
+                        )
+                        if os.path.exists(possible_html_path):
+                            html_output_path = possible_html_path
+                            output_html_paths.append(html_output_path)
+                            log(f"Found HTML output path: {html_output_path}")
+                    
+                    # If logs_directory is not set, try to find HTML in temp directory
+                    if not logs_dir or not html_output_path:
+                        # ... existing temp directory search code ...
+                        temp_dir = tempfile.gettempdir()
+                        for root, dirs, files in os.walk(temp_dir):
+                            if nova_session_id in root:
+                                for file in files:
+                                    if file.startswith(f"act_{nova_act_id}") and file.endswith("_output.html"):
+                                        html_output_path = os.path.join(root, file)
+                                        output_html_paths.append(html_output_path)
+                                        log(f"Found HTML output path in temp dir: {html_output_path}")
+                                        break
+            
+                # Extract agent thinking (only if we used nova.act)
+                agent_messages = []
+                debug_info = {}
+                if result:
+                    agent_messages, debug_info = extract_agent_thinking(
+                        result, 
+                        nova_instance, 
+                        logs_dir if 'logs_dir' in locals() else None,
+                        instruction_to_execute
+                    )
+                elif action_handled_directly:
+                    debug_info = {"direct_action": True, "action_type": "playwright_direct"}
+            
+                # Take a screenshot if requested
+                screenshot_data = None
+                if embedScreenshot:
                     try:
-                        screenshot_bytes = nova.page.screenshot()
+                        log(f"[{session_id}] Capturing screenshot...")
+                        screenshot_bytes = nova_instance.page.screenshot()
                         screenshot_data = base64.b64encode(screenshot_bytes).decode('utf-8')
-                        log("Captured screenshot successfully")
+                        log(f"[{session_id}] Captured screenshot successfully ({len(screenshot_data)} bytes encoded)")
                     except Exception as e:
-                        log(f"Error taking screenshot: {str(e)}")
+                        log(f"[{session_id}] Error taking screenshot: {str(e)}")
                 
                 # Update session registry with results
                 with session_lock:
                     if session_id in active_sessions:
                         active_sessions[session_id]["url"] = updated_url
                         active_sessions[session_id]["results"].append({
-                            "action": instruction,
+                            "action": original_instruction,  # Log the original requested action
+                            "executed": instruction_to_execute if not action_handled_directly else "direct_playwright",
                             "response": response_content,
                             "agent_messages": agent_messages,
-                            "output_html_paths": output_html_paths
+                            "output_html_paths": output_html_paths,
+                            "screenshot_included": bool(screenshot_data),
+                            "direct_action": action_handled_directly
                         })
+                        active_sessions[session_id]["last_updated"] = time.time()
+                        active_sessions[session_id]["status"] = "browser_ready"  # Ready for next action
+                        active_sessions[session_id]["error"] = None  # Clear previous error on success
                 
                 # Format agent thinking for MCP response
                 agent_thinking = []
@@ -681,49 +923,77 @@ async def browser_session(action: str, session_id: Optional[str] = None, url: Op
                         "content": message,
                         "source": "nova_act"
                     })
-                
+            
                 # Create result properly formatted for JSON-RPC
-                agent_message_text = "\n".join([msg["content"] for msg in agent_thinking]) if agent_thinking else "No agent messages recorded"
+                action_type = "direct Playwright" if action_handled_directly else "Nova Act SDK"
                 mcp_result = {
                     "content": [
                         {
                             "type": "text",
-                            "text": f"Successfully executed: {instruction}\n\nCurrent URL: {updated_url}\nPage Title: {page_title}"
+                            "text": f"Successfully executed via {action_type}: {original_instruction or 'Schema Observation'}\n\nCurrent URL: {updated_url}\nPage Title: {page_title}\nResponse: {json.dumps(response_content)[:500]}..."
                         }
                     ],
                     "agent_thinking": agent_thinking,
-                    "isError": False
+                    "isError": False,
+                    "session_id": session_id,  # Include session ID in result
+                    "direct_action": action_handled_directly
                 }
                 
+                # Add screenshot if available
+                if screenshot_data:
+                    mcp_result["content"].append({
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/png", "data": screenshot_data}
+                    })
+            
                 # Include debug info if in debug mode
-                if DEBUG_MODE:
+                if DEBUG_MODE or debug:
                     mcp_result["debug"] = {
                         "html_paths": output_html_paths,
-                        "extraction_info": debug_info
+                        "extraction_info": debug_info,
+                        "response_object": response_content,  # Include raw response for debug
+                        "action_handled_directly": action_handled_directly
                     }
-                
+            
                 return mcp_result
                 
-            except Exception as e:
-                error_message = str(e)
+            # Refined Error Handling
+            except ActGuardrailsError as e:
+                error_message = f"Guardrail triggered: {str(e)}"
+                error_type = "Guardrails"
                 error_tb = traceback.format_exc()
-                log(f"Error executing instruction: {error_message}")
-                log(f"Traceback: {error_tb}")
-                
-                raise Exception(error_message)
+            except ActError as e:
+                error_message = f"Nova Act execution error: {str(e)}"
+                error_type = "NovaAct" 
+                error_tb = traceback.format_exc()
+            except Exception as e:
+                error_message = f"General execution error: {str(e)}"
+                error_type = "General"
+                error_tb = traceback.format_exc()
+            
+            # Common Error Logging and Update - unchanged
+            log(f"[{session_id}] Error ({error_type}): {error_message}")
+            log(f"Traceback: {error_tb}")
+            with session_lock:
+                if session_id in active_sessions:
+                    active_sessions[session_id]["status"] = "error"
+                    active_sessions[session_id]["error"] = error_message
+                    active_sessions[session_id]["last_updated"] = time.time()
+            # Propagate error message to be caught by the main handler
+            raise Exception(f"({error_type}) {error_message}")
         
-        # Run the synchronous code in a thread pool
+        # Run the synchronous code in the session's dedicated thread
         try:
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                # Use run_in_executor to run the synchronous code in a separate thread
-                result = await asyncio.get_event_loop().run_in_executor(
-                    executor, execute_instruction
-                )
+            # Use run_in_executor to run the synchronous code in the session's thread
+            result = await asyncio.get_event_loop().run_in_executor(
+                executor, execute_instruction
+            )
+            
+            # Return the result as a proper JSON-RPC response
+            return create_jsonrpc_response(request_id, result)
                 
-                # Return the result as a proper JSON-RPC response
-                return create_jsonrpc_response(request_id, result)
-                    
         except Exception as e:
+            # ... existing error handling code ...
             error_message = str(e)
             error_tb = traceback.format_exc()
             log(f"Error in thread execution: {error_message}")
@@ -733,7 +1003,6 @@ async def browser_session(action: str, session_id: Optional[str] = None, url: Op
                 "code": -32603,
                 "message": f"Error executing instruction: {error_message}",
                 "data": {
-                    "traceback": error_tb,
                     "session_id": session_id
                 }
             }
@@ -750,52 +1019,84 @@ async def browser_session(action: str, session_id: Optional[str] = None, url: Op
             }
             return create_jsonrpc_response(request_id, error=error)
         
-        # Get the session data
-        with session_lock:
-            session_data = active_sessions.get(session_id)
-        
-        if not session_data:
-            error = {
-                "code": -32602,
-                "message": f"No active session found with session_id: {session_id}",
-                "data": None
-            }
-            return create_jsonrpc_response(request_id, error=error)
-        
-        # For "end", we just update the state in our registry
+        # Define a synchronous function to end the session
         def end_browser_session():
             try:
-                # Update session registry
+                # Get the session data and NovaAct instance
+                with session_lock:
+                    session_data = active_sessions.get(session_id)
+                    if not session_data:
+                        raise Exception(f"No active session found to end: {session_id}")
+                    nova_instance = session_data.get("nova_instance")
+                    executor = session_data.get("executor")
+                
+                log(f"[{session_id}] Ending session...")
+                if nova_instance:
+                    try:
+                        # Close the NovaAct instance
+                        log(f"[{session_id}] Attempting to close NovaAct instance...")
+                        if hasattr(nova_instance, 'close') and callable(nova_instance.close):
+                            nova_instance.close()
+                            log(f"[{session_id}] NovaAct instance closed.")
+                        elif hasattr(nova_instance, '__exit__') and callable(nova_instance.__exit__):
+                            nova_instance.__exit__(None, None, None)  # Try context manager exit
+                            log(f"[{session_id}] NovaAct instance exited via __exit__.")
+                        else:
+                            log(f"[{session_id}] Warning: No close() or __exit__ method found. Browser might remain.")
+                    except Exception as e:
+                        # Log error but continue to remove from registry
+                        log(f"[{session_id}] Error closing NovaAct instance: {e}")
+                
+                # Shutdown the executor if it exists
+                if executor:
+                    try:
+                        executor.shutdown(wait=False)
+                        log(f"[{session_id}] Executor shutdown.")
+                    except Exception as e:
+                        log(f"[{session_id}] Error shutting down executor: {e}")
+                
+                # Update session registry or remove from registry
                 with session_lock:
                     if session_id in active_sessions:
                         active_sessions[session_id]["status"] = "ended"
                         active_sessions[session_id]["complete"] = True
+                        active_sessions[session_id]["nova_instance"] = None  # Clear the instance
+                        active_sessions[session_id]["executor"] = None  # Clear the executor
                 
                 return {
                     "session_id": session_id,
-                    "status": "ended", 
+                    "status": "ended",
                     "success": True
                 }
-                
             except Exception as e:
                 error_message = str(e)
                 error_tb = traceback.format_exc()
                 log(f"Error ending browser session: {error_message}")
                 log(f"Traceback: {error_tb}")
-                
                 raise Exception(error_message)
         
-        # Run the synchronous code in a thread pool
+        # Get the session's executor
+        with session_lock:
+            session_data = active_sessions.get(session_id)
+            if not session_data:
+                error = {
+                    "code": -32602,
+                    "message": f"No active session found to end: {session_id}",
+                    "data": None
+                }
+                return create_jsonrpc_response(request_id, error=error)
+            executor = session_data.get("executor")
+        
+        # Run the synchronous code in the session's dedicated thread
         try:
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                # Use run_in_executor to run the synchronous code in a separate thread
-                result = await asyncio.get_event_loop().run_in_executor(
-                    executor, end_browser_session
-                )
+            # Use run_in_executor to run the synchronous code in the session's thread
+            result = await asyncio.get_event_loop().run_in_executor(
+                executor if executor else None, end_browser_session
+            )
+            
+            # Return the result as a proper JSON-RPC response
+            return create_jsonrpc_response(request_id, result)
                 
-                # Return the result as a proper JSON-RPC response
-                return create_jsonrpc_response(request_id, result)
-                    
         except Exception as e:
             error_message = str(e)
             error_tb = traceback.format_exc()
@@ -806,7 +1107,6 @@ async def browser_session(action: str, session_id: Optional[str] = None, url: Op
                 "code": -32603,
                 "message": f"Error ending browser session: {error_message}",
                 "data": {
-                    "traceback": error_tb,
                     "session_id": session_id
                 }
             }
