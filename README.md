@@ -216,43 +216,61 @@ To check for and close any lingering sessions, you can use the `list_browser_ses
 
 ## Example Use Cases
 
-Here are some more complex tasks you can accomplish using nova-act-mcp:
+Here are some practical developer-focused tasks you can accomplish using nova-act-mcp:
 
-### E-commerce Price Comparison
-
-```
-1. Start a session on amazon.com
-2. Execute "search for wireless earbuds"
-3. Execute "go back to search results"
-4. Execute "filter by brands: Sony, Bose"
-5. Execute "Compare prices of Sony vs Bose earbuds"
-6. Start a new session on bestbuy.com
-7. Execute "search for the same Sony model found on Amazon"
-8. Execute "find price match policy"
-```
-
-### Research and Data Collection
+### On-Call Response Automation
 
 ```
-1. Start a session on scholar.google.com
-2. Execute "search for 'large language models applications 2023'"
-3. Execute "filter by last year"
-4. Execute "click on the most cited paper"
-5. Execute "find and list the references section"
-6. Execute "Identify the most frequently cited authors in the references"
+1. Start a session on our-monitoring-dashboard.company.com
+2. Execute "login with my SSO credentials"
+3. Execute "check the status of the payment processing service"
+4. Execute "take a screenshot of the error metrics graph"
+5. Execute "navigate to the database connection panel"
+6. Execute "verify if connection timeout errors have increased"
+7. Execute "check service health endpoints status"
 ```
 
-### Travel Planning
+### Web Application Testing
 
 ```
-1. Start a session on kayak.com
-2. Execute "search for flights from San Francisco to Tokyo in October"
-3. Execute "filter for direct flights only"
-4. Execute "select the cheapest flight"
-5. Start a new session on hotels.com
-6. Execute "search for hotels in Tokyo near Shinjuku station"
-7. Execute "filter by 4+ stars and under $200 per night"
-8. Execute "check availability for October 10-17"
+1. Start a session on localhost:3000
+2. Execute "fill the registration form with test data, but use an invalid email format"
+3. Execute "verify that validation errors appear for the email field"
+4. Execute "correct the email and submit the form"
+5. Execute "check if the confirmation page loads with the correct user information"
+6. Execute "verify the welcome email appears in the test inbox"
+```
+
+### Cross-Browser Verification
+
+```
+1. Start a session on localhost:3000/new-feature
+2. Execute "check if the dropdown menu works on mobile viewport"
+3. Execute "resize to desktop dimensions"
+4. Execute "verify that responsive layout elements adjust correctly"
+5. Execute "take a screenshot of the component in both mobile and desktop views"
+6. Execute "test keyboard navigation through the form elements"
+```
+
+### Local Development Loop
+
+```
+1. Start a session on localhost:3000
+2. Execute "inspect the CSS for the header element"
+3. Execute "verify the padding matches the design spec of 16px"
+4. Execute "refresh the page and check if the media query triggers at 768px width"
+5. Execute "test if dark mode toggle correctly updates the color scheme"
+```
+
+### API Endpoint Verification
+
+```
+1. Start a session on our-api-dashboard.company.com
+2. Execute "navigate to the /users endpoint documentation"
+3. Execute "send a test request with parameter limit=10"
+4. Execute "verify the response includes the new 'last_login' field"
+5. Execute "test the same endpoint with an invalid authentication token"
+6. Execute "confirm that the proper error response is returned"
 ```
 
 ## Performance Considerations
