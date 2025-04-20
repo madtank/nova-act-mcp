@@ -214,6 +214,28 @@ The browser launched during a `start` action remains open throughout the session
 
 To check for and close any lingering sessions, you can use the `list_browser_sessions` tool to identify active sessions, then call `end` on any sessions you no longer need.
 
+### Browser Visibility and Screenshots
+
+The nova-act-mcp server has been configured with some important defaults:
+
+- **Non-Headless Mode by Default**: Browsers now start in non-headless mode (visible) by default, making it easier to observe automation in action. This helps with debugging and monitoring the browser's behavior.
+
+- **Screenshot Embedding Disabled**: Screenshot embedding has been disabled to prevent excessive token usage in the context window. Large base64-encoded screenshots were causing token explosions, making conversations difficult to maintain.
+
+You can still:
+- Explicitly set `"headless": true` in your requests if you prefer the browser to run invisibly
+- View the browser window directly as it performs actions (since the default is now visible)
+- Access Nova Act's HTML logs which are referenced in the response (the path is provided)
+
+**Example:**
+```
+# Start a visible browser (default)
+control_browser {"action": "start", "url": "https://www.google.com"}
+
+# Start a headless (invisible) browser by overriding the default
+control_browser {"action": "start", "url": "https://www.google.com", "headless": true}
+```
+
 ## Example Use Cases
 
 Here are some practical developer-focused tasks you can accomplish using nova-act-mcp:
@@ -287,7 +309,7 @@ When working with browser automation at scale, keep these performance considerat
 
 ### Optimization Strategies
 
-- **Headless Mode**: For production environments, consider running browsers in headless mode for better resource efficiency.
+- **Headless Mode**: For production environments, consider explicitly setting headless mode to true (`"headless": true`) for better resource efficiency. While the default is now non-headless for better debugging, headless browsers use fewer resources.
 - **Request Throttling**: Implement rate limiting to avoid triggering anti-bot measures on websites.
 - **Caching**: Cache responses when appropriate to reduce redundant requests.
 - **Efficient Selectors**: Use precise selectors rather than broad instructions to improve performance.
@@ -334,6 +356,15 @@ Followed by:
 
 This lets you verify that the server is working correctly and see exactly what the agent is thinking during each step.
 
+For manual testing, we provide a test script that works with The Internet Herokuapp (a testing website):
+
+```bash
+# Run the test script to generate a set of test commands
+./testing/test_form_interaction.sh
+
+# Follow the instructions to test interactive browser automation
+```
+
 ## Troubleshooting
 
 ### Nova Act API Key Issues
@@ -360,6 +391,14 @@ If you notice browser windows staying open after you're done using the tool:
 2. Use `list_browser_sessions` to check for any active sessions that need to be closed
 3. Restart the MCP server if needed to force cleanup of all browser sessions
 4. Check your system's task manager for any lingering browser processes
+
+### Viewing Browser Activity
+
+Since browsers now run in visible mode by default:
+
+1. You can directly observe the automation actions in real-time
+2. If you need to hide the browser (for example, in CI/CD environments), explicitly set `"headless": true`
+3. For debugging, the response includes the path to Nova Act's HTML log file, which shows detailed execution steps
 
 ### Debug Mode
 
@@ -454,4 +493,6 @@ This ensures that all developers and users have consistent dependency versions.
 ## Future Enhancements
 
 - [x] **Multi-Step Session State**: Support true in-page session persistence across multiple `execute` calls so that form inputs and DOM changes remain live between commands.
+- [x] **Improved Browser Visibility**: Default to visible browsers for better debugging and observation.
+- [x] **Reduced Token Usage**: Disabled screenshot embedding to prevent token explosion in LLM context windows.
 - **Improve Profile Persistence**: Enhance handling of profiles for even more reliable cookie and storage reuse.
