@@ -403,22 +403,39 @@ async def list_browser_sessions() -> str:
     name="control_browser",
     description=(
         """Controls web browser sessions via Nova Act.
-Actions:
-  - start: Opens browser with required 'url'. Optional 'headless' (default: False). Returns 'session_id'.
-  - execute: Performs actions with required 'session_id'.
-      - 'url': Navigate to a new page (use full URL)
-      - 'instruction': Natural language command (e.g., "click login button")
-      - 'username'/'password': For authentication forms
-      - 'schema': Extract structured data instead of performing action
-  - end: Closes session (requires 'session_id')
+        Actions:
+        - start: Opens browser with required 'url'. Optional 'headless' (default: False). Returns 'session_id'.
+        - execute: Performs actions with required 'session_id'.
+            - 'url': Navigate to a new page (use full URL)
+            - 'instruction': Natural language command (e.g., "click login button")
+            - 'username'/'password': For authentication forms
+            - 'schema': Extract structured data in JSON format (auto-detects page elements or accepts custom extraction templates)
+        - end: Closes session (requires 'session_id')
 
-Returns session details including current URL/title and execution log path.
+        Returns session details including current URL/title and execution log path. 
+        HTTP logs are available as hyperlinks in the response when containing notable information.
 
-Capabilities: Navigation, clicking, typing, form submission, data extraction
-Limitations: Complex interactions like hover/drag-drop may be unreliable
+        Form Element Tips:
+        - Dropdowns: Use "select [option name] from dropdown" or "choose [option name] from the dropdown menu"
+        - Checkboxes:
+            - Actions: "check the checkbox labeled [label]" or "uncheck the checkbox labeled [label]"
+            - Verification: "identify all checkboxes and their states" or use schema for reliable verification
+        - Radio buttons: Use "select the radio button labeled [label]"
+        - Input fields: Use "type [text] into the [field name] field"
 
-Example workflow: Start with URL → search for specific product → 
-find product → add to cart → login → share items in cart for logged-in user"""
+        Error Handling:
+        - Element not found: Returns error message with page context
+        - Timeouts: Default 30-second timeout with automatic retry (configurable)
+        - Execution errors: Detailed logs available for troubleshooting
+
+        Note: For verifying form element states, prefer using the schema parameter or "identify" instructions
+        rather than "check if" or "verify" which might be interpreted as toggle actions.
+
+        Example workflow: Start with URL → search for specific product → 
+        find product → add to cart → login → share items in cart for logged-in user
+
+        Schema example: Use 'schema': {"products": {"selector": ".product-item", "fields": {"name": ".title", "price": ".price"}}}
+        or simply 'schema': {"extract": "products"} to auto-detect common elements"""
     )
 )
 

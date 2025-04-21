@@ -479,6 +479,93 @@ The agent will analyze the page content and extract data that matches your schem
 2. Extracting only the most relevant columns
 3. Adding pagination to retrieve data in batches
 
+### Form Element Interactions
+
+Nova Act MCP provides specific capabilities for interacting with common form elements. Based on our testing, here are the recommended ways to interact with different form elements:
+
+#### Dropdown Menus
+
+For reliable dropdown interactions, use explicit phrasing:
+
+```json
+// Recommended approach for dropdown interaction
+control_browser {
+  "action": "execute", 
+  "session_id": "your-session-id", 
+  "instruction": "select Option 2 from the dropdown"
+}
+```
+
+Our testing shows that these phrasings work consistently:
+- "select [option name] from dropdown" 
+- "choose [option name] from the dropdown menu"
+
+To verify which option is currently selected, use a schema:
+
+```json
+// Check current dropdown selection
+control_browser {
+  "action": "execute", 
+  "session_id": "your-session-id",
+  "schema": {
+    "type": "object", 
+    "properties": {
+      "selectedOption": {"type": "string"}
+    }
+  }
+}
+```
+
+Less reliable approaches to avoid:
+- ❌ "Click on the dropdown" (too vague, may not complete the selection)
+- ❌ "Open the dropdown menu" (only opens but doesn't select)
+
+#### Checkboxes
+
+For checkboxes, use precise instructions:
+
+```json
+// Toggle a checkbox
+control_browser {
+  "action": "execute", 
+  "session_id": "your-session-id", 
+  "instruction": "check the checkbox labeled 'I agree to terms'"
+}
+
+// Or uncheck
+control_browser {
+  "action": "execute", 
+  "session_id": "your-session-id", 
+  "instruction": "uncheck the checkbox labeled 'Subscribe to newsletter'"
+}
+```
+
+#### Radio Buttons
+
+For radio button selection:
+
+```json
+// Select a radio button
+control_browser {
+  "action": "execute", 
+  "session_id": "your-session-id", 
+  "instruction": "select the radio button labeled 'Option B'"
+}
+```
+
+#### Input Fields
+
+For text input fields:
+
+```json
+// Type into an input field
+control_browser {
+  "action": "execute", 
+  "session_id": "your-session-id", 
+  "instruction": "type 'example@email.com' into the email field"
+}
+```
+
 ## Performance Considerations
 
 When working with browser automation at scale, keep these performance considerations in mind:
@@ -645,6 +732,8 @@ While we've implemented agent thinking extraction, we note that this information
 
 - **No file uploads**: The browser automation can't upload files from your local system
 - **Limited to web interactions**: Can only interact with elements visible on the webpage
+- **Hover interactions not supported**: The current implementation cannot reliably perform hover-based interactions or extract content that appears on hover
+- **JavaScript alerts not reliably handled**: While alert dialogs visually appear, the agent cannot properly control or interact with them
 - **Some sites may block automation**: Sites with strong anti-bot measures may present challenges
 - **Session timeouts**: Long-running sessions may be terminated by websites
 
