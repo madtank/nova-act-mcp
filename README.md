@@ -30,7 +30,8 @@ This project exposes Nova Act's powerful browser automation capabilities through
 
 1. Control web browsers directly from AI assistants
 2. Execute interactive browser automation tasks
-3. Persist cookies and local storage between interactions (profile data is reused), noting that each `execute` spawns a fresh browser context so in-page state or filled forms will not carry over unless combined into a single instruction
+3. Persist cookies and local storage between interactions (profile data is reused)
+
 4. See the agent's step-by-step reasoning process
 
 ## Prerequisites
