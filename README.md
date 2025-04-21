@@ -368,7 +368,7 @@ Nova Act MCP can handle a variety of browser automation tasks:
 
 - **Basic Navigation & Form Handling**: Navigate websites, fill forms, and handle login flows securely
 - **Dynamic Content**: Wait for and interact with content that loads asynchronously
-- **Data Extraction**: Extract structured data from web pages using schemas
+- **Structured Data Extraction**: Extract table data and other structured content using JSON schemas
 - **Complex Interactions**: Handle alerts, dropdowns, and other interactive elements
 
 <div align="center">
@@ -378,9 +378,59 @@ Nova Act MCP can handle a variety of browser automation tasks:
   <a href="#dynamic-content">
     <img src="assets/test_dynamic_loading.png" alt="Dynamic Content Loading" width="250"/>
   </a>
+  <a href="#structured-data-extraction">
+    <img src="assets/nova-act-extract-news.png" alt="Structured Data Extraction" width="250"/>
+  </a>
 </div>
 
 For best results, provide clear, specific instructions and follow the navigation best practices outlined above.
+
+### Structured Data Extraction
+
+One of the most powerful capabilities of Nova Act MCP is its ability to extract structured data from web pages using JSON schemas:
+
+```json
+// Example schema for extracting table data
+{
+  "type": "object",
+  "properties": {
+    "tableData": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "price": {"type": "string"},
+          "description": {"type": "string"}
+        }
+      }
+    }
+  }
+}
+```
+
+To use this feature:
+
+```json
+// Extract structured data using a schema
+control_browser {
+  "action": "execute", 
+  "session_id": "your-session-id", 
+  "schema": {your_schema_here}
+}
+```
+
+The agent will analyze the page content and extract data that matches your schema structure. This is particularly useful for:
+
+- Extracting product information from e-commerce sites
+- Retrieving data from tables and lists
+- Gathering structured information from search results
+- Collecting consistent data across multiple pages
+
+**Note on Data Size**: The default response size limit is 5000 characters. If you're extracting large datasets that might exceed this limit, consider:
+1. Breaking your extraction into smaller chunks
+2. Extracting only the most relevant columns
+3. Adding pagination to retrieve data in batches
 
 ## Performance Considerations
 

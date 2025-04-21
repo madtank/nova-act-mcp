@@ -950,7 +950,7 @@ async def browser_session(
                 main_text = (
                     f"Successfully executed via {action_type}: {original_instruction or 'Schema Observation'}\n\n"
                     f"Current URL: {updated_url}\nPage Title: {page_title}\n"
-                    f"Response: {json.dumps(response_content)[:500]}..."
+                    f"Response: {json.dumps(response_content)[:5000]}..."
                 )
                 if final_html_log_path:
                     main_text += f"\nNova Act HTML Log Path: {final_html_log_path}"
