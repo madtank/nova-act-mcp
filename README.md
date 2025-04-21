@@ -362,6 +362,53 @@ control_browser {
 
 This approach keeps credentials out of instruction text while providing a seamless login experience.
 
+### Browser Session State Persistence
+
+One of the key features of nova-act-mcp is its ability to maintain session state across multiple navigation actions. This makes it ideal for complex workflows that span multiple pages on a website.
+
+Our testing has verified that the browser automation tool properly maintains:
+
+1. **Authentication State**: Login sessions persist across page navigations
+2. **Cookies & Local Storage**: Site preferences and settings are preserved
+3. **Navigation History**: The ability to navigate between pages while maintaining state
+
+This has been verified with workflows that:
+- Log in to a secure area
+- Navigate to different pages
+- Interact with elements on those pages
+- Return to the secure area with authentication still intact
+
+For optimal session persistence:
+
+```json
+// Start a session
+control_browser {"action": "start", "url": "https://example.com/login"}
+
+// Login securely
+control_browser {
+  "action": "execute", 
+  "session_id": "your-session-id", 
+  "username": "your-username", 
+  "password": "your-password"
+}
+
+// Navigate to another page while maintaining session cookies
+control_browser {
+  "action": "execute", 
+  "session_id": "your-session-id", 
+  "instruction": "Navigate to https://example.com/account"
+}
+
+// Continue working with the authenticated session
+control_browser {
+  "action": "execute", 
+  "session_id": "your-session-id", 
+  "instruction": "Check my account balance"
+}
+```
+
+**Important Note**: While authentication state (cookies, local storage) persists across page navigations, each `execute` command launches a fresh browser context on that same profile. This means that in-page state changes (form fields, JavaScript variables) do not persist between separate `execute` commands. For multi-step interactions on a single page, include all steps in a single instruction.
+
 ## Example Capabilities
 
 Nova Act MCP can handle a variety of browser automation tasks:
