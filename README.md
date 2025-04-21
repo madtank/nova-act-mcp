@@ -2,8 +2,6 @@
 
 An MCP server providing tools to control web browsers using the Amazon Nova Act SDK. Enables interactive browser automation with transparent agent reasoning via MCP.
 
-![Nova Act MCP Example](assets/search_news.png)
-
 ## Table of Contents
 - [What is nova-act-mcp?](#what-is-nova-act-mcp)
 - [Prerequisites](#prerequisites)
@@ -12,7 +10,7 @@ An MCP server providing tools to control web browsers using the Amazon Nova Act 
 - [Understanding Agent Thinking](#understanding-agent-thinking)
 - [Tips for Effective Browser Automation](#tips-for-effective-browser-automation)
 - [Advanced Features](#advanced-features)
-- [Example Use Cases](#example-use-cases)
+- [Example Capabilities](#example-capabilities)
 - [Performance Considerations](#performance-considerations)
 - [Testing](#testing)
 - [Troubleshooting](#troubleshooting)
@@ -41,7 +39,7 @@ Before getting started, you'll need:
 
 - Python 3.10 or higher
 - An Amazon Nova Act API key (get one from [https://nova.amazon.com/act](https://nova.amazon.com/act))
-- Claude Desktop application (for using with Claude)
+- An MCP-compatible client (Claude Desktop, VSCode with Copilot Plugin, or any other client that supports the Model Context Protocol)
 
 ## Installation
 
@@ -141,6 +139,41 @@ This transparency helps you understand how the agent is approaching tasks and ma
 
 ## Tips for Effective Browser Automation
 
+### Navigation Limitations and Best Practices
+
+**IMPORTANT:** The Nova Act agent has specific navigation limitations that are critical to understand:
+
+1. **Always Provide URLs for Page Changes**: When navigating to a different website or page, you MUST include the full URL in the `url` parameter:
+   ```json
+   {"action": "execute", "session_id": "your-session-id", "url": "https://www.amazon.com/", "instruction": "Search for headphones"}
+   ```
+
+2. **No Back Button Navigation**: The agent doesn't understand browser history concepts like "back" or "forward" buttons. To return to a previous page, you must provide its full URL again.
+
+3. **Direct URL Access is Best**: Rather than trying to navigate through multiple pages to reach your target, provide the direct URL of your target page whenever possible.
+
+4. **Page-Specific Actions**: Each instruction should be specific to the current page. If you need to work on different pages, use separate commands with the appropriate URLs.
+
+### Example: Correct Workflow
+
+```
+# CORRECT: Direct navigation to target site with specific action
+control_browser {"action": "execute", "session_id": "your-session-id", "url": "https://www.amazon.com", "instruction": "Search for bluetooth headphones"}
+
+# CORRECT: New direct navigation to a different site
+control_browser {"action": "execute", "session_id": "your-session-id", "url": "https://www.google.com", "instruction": "Search for weather forecast"}
+```
+
+### Example: Problematic Workflow
+
+```
+# PROBLEMATIC: Expecting navigation without URL
+control_browser {"action": "execute", "session_id": "your-session-id", "instruction": "Go to Amazon and search for headphones"}
+
+# PROBLEMATIC: Assuming back button functionality
+control_browser {"action": "execute", "session_id": "your-session-id", "instruction": "Go back to the previous page"}
+```
+
 ### Be Specific and Concise
 
 When prompting for browser actions:
@@ -165,6 +198,34 @@ Instead of trying to do everything at once, break it down into interactive steps
 3. Execute "filter by 4+ stars"
 4. Execute "sort by price low to high"
 5. Execute "find the price of the first item"
+```
+
+### Handling Invalid URLs and Navigation Errors
+
+The Nova Act agent handles invalid or inaccessible URLs in different ways, which is important to understand when working with AI systems that might reference non-existent websites:
+
+1. **Non-existent Domains**: If the domain doesn't exist (e.g., `https://this-website-definitely-does-not-exist-123456789.com`), you'll receive an error message like:
+   ```
+   Error executing instruction: Failed to navigate to execute URL https://non-existent-site.com: 
+   Page.goto: net::ERR_NAME_NOT_RESOLVED
+   ```
+
+2. **Valid Domain with Non-existent Path**: If the domain exists but the specific page doesn't (e.g., `https://example.com/non-existent-page-12345`), the browser will still load the domain's default page or an error page provided by the website. The agent will describe whatever content appears.
+
+3. **Connection Refused**: For URLs pointing to servers that aren't running or aren't accessible (e.g., `http://localhost:9999`), you'll receive an error like:
+   ```
+   Error executing instruction: Failed to navigate to execute URL http://localhost:9999: 
+   Page.goto: net::ERR_CONNECTION_REFUSED
+   ```
+
+**Best Practice**: When dealing with URLs that might not exist (such as those suggested by an AI model), start with a verified root domain first, then navigate to more specific pages:
+
+```
+# Start with a known working domain
+control_browser {"action": "execute", "session_id": "your-session-id", "url": "https://example.com", "instruction": "Tell me what you see"}
+
+# Then try a more specific path if needed
+control_browser {"action": "execute", "session_id": "your-session-id", "url": "https://example.com/specific-path", "instruction": "Tell me what you see"}
 ```
 
 ## Advanced Features
@@ -236,66 +297,90 @@ control_browser {"action": "start", "url": "https://www.google.com"}
 control_browser {"action": "start", "url": "https://www.google.com", "headless": true}
 ```
 
-## Example Use Cases
+### Secure Login Handling
 
-Here are some practical developer-focused tasks you can accomplish using nova-act-mcp:
+Nova Act MCP provides a secure way to handle login credentials that avoids exposing sensitive information in instructions:
 
-### On-Call Response Automation
-
-This example shows how an AI system could automatically respond to alerts by investigating your internal systems:
-
-```
-1. Start a session on our-monitoring-dashboard.company.com
-2. Execute "authenticate using system credentials"
-3. Execute "check the status of the payment processing service"
-4. Execute "take a screenshot of the error metrics graph"
-5. Execute "navigate to the database connection panel"
-6. Execute "verify if connection timeout errors have increased"
-7. Execute "check service health endpoints status"
+```json
+// SECURE: Using dedicated username/password parameters
+control_browser {
+  "action": "execute", 
+  "session_id": "your-session-id", 
+  "username": "tomsmith", 
+  "password": "SuperSecretPassword!"
+}
 ```
 
-### Web Application Testing
+When you provide the `username` and/or `password` parameters:
 
-```
-1. Start a session on localhost:3000
-2. Execute "fill the registration form with test data, but use an invalid email format"
-3. Execute "verify that validation errors appear for the email field"
-4. Execute "correct the email and submit the form"
-5. Execute "check if the confirmation page loads with the correct user information"
-6. Execute "verify the welcome email appears in the test inbox"
-```
+1. The MCP server **directly uses Playwright** to find and fill credential fields
+2. Credentials are never exposed in the instruction text or agent thinking
+3. If a login form is detected, it will automatically try to submit the form after filling credentials
+4. If just `username` is provided without a `password`, it will still attempt form submission (useful for testing invalid login scenarios)
 
-### Cross-Browser Verification
+This approach is significantly more secure than including credentials in the instruction text:
 
-```
-1. Start a session on localhost:3000/new-feature
-2. Execute "check if the dropdown menu works on mobile viewport"
-3. Execute "resize to desktop dimensions"
-4. Execute "verify that responsive layout elements adjust correctly"
-5. Execute "take a screenshot of the component in both mobile and desktop views"
-6. Execute "test keyboard navigation through the form elements"
+```json
+// INSECURE: Don't do this!
+control_browser {
+  "action": "execute", 
+  "session_id": "your-session-id", 
+  "instruction": "Type username 'tomsmith' and password 'SuperSecretPassword!' into the login form"
+}
 ```
 
-### Local Development Loop
+#### How Login Form Detection Works
 
-```
-1. Start a session on localhost:3000
-2. Execute "inspect the CSS for the header element"
-3. Execute "verify the padding matches the design spec of 16px"
-4. Execute "refresh the page and check if the media query triggers at 768px width"
-5. Execute "test if dark mode toggle correctly updates the color scheme"
+The tool uses these strategies to find and fill login forms:
+
+1. First tries explicit selectors: `input#username, input[name='username'], input[type='text'], input[name*='user']` for username fields
+2. Similarly uses `input#password, input[name='password'], input[type='password'], input[name*='pass']` for password fields  
+3. If those fail, it falls back to using Nova Act to "focus the username/password field" and then uses keyboard typing
+4. After filling fields, if no further instruction is provided, it automatically clicks the Login button
+
+#### Example: Complete Login Flow
+
+```json
+// Start a session on a login page
+control_browser {"action": "start", "url": "https://the-internet.herokuapp.com/login"}
+
+// Provide credentials securely (will auto-submit form)
+control_browser {
+  "action": "execute", 
+  "session_id": "your-session-id", 
+  "username": "tomsmith", 
+  "password": "SuperSecretPassword!"
+}
+
+// After login, perform actions on the authenticated page
+control_browser {
+  "action": "execute", 
+  "session_id": "your-session-id", 
+  "instruction": "Check if we're logged in successfully"
+}
 ```
 
-### API Endpoint Verification
+This approach keeps credentials out of instruction text while providing a seamless login experience.
 
-```
-1. Start a session on our-api-dashboard.company.com
-2. Execute "navigate to the /users endpoint documentation"
-3. Execute "send a test request with parameter limit=10"
-4. Execute "verify the response includes the new 'last_login' field"
-5. Execute "test the same endpoint with an invalid authentication token"
-6. Execute "confirm that the proper error response is returned"
-```
+## Example Capabilities
+
+Nova Act MCP can handle a variety of browser automation tasks:
+
+- **Basic Navigation & Form Handling**: Navigate websites, fill forms, and handle login flows securely
+- **Dynamic Content**: Wait for and interact with content that loads asynchronously
+- **Data Extraction**: Extract structured data from web pages using schemas
+- **Complex Interactions**: Handle alerts, dropdowns, and other interactive elements
+
+<div align="center">
+  <a href="#basic-navigation-and-form-handling">
+    <img src="assets/test_basic_auth.png" alt="Basic Navigation & Form Authentication" width="250"/>
+  </a>
+  <a href="#dynamic-content">
+    <img src="assets/test_dynamic_loading.png" alt="Dynamic Content Loading" width="250"/>
+  </a>
+</div>
+
+For best results, provide clear, specific instructions and follow the navigation best practices outlined above.
 
 ## Performance Considerations
 

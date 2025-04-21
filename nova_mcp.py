@@ -399,7 +399,29 @@ async def list_browser_sessions() -> str:
     return create_jsonrpc_response(request_id, result)
 
 
-@mcp.tool(name="control_browser", description="Control a web browser session via Nova Act agent in multiple steps: start, execute, and end sessions. Screenshot embedding is currently disabled due to token limitations.")
+@mcp.tool(
+    name="control_browser",
+    description=(
+        """Controls web browser sessions via Nova Act.
+Actions:
+  - start: Opens browser with required 'url'. Optional 'headless' (default: False). Returns 'session_id'.
+  - execute: Performs actions with required 'session_id'.
+      - 'url': Navigate to a new page (use full URL)
+      - 'instruction': Natural language command (e.g., "click login button")
+      - 'username'/'password': For authentication forms
+      - 'schema': Extract structured data instead of performing action
+  - end: Closes session (requires 'session_id')
+
+Returns session details including current URL/title and execution log path.
+
+Capabilities: Navigation, clicking, typing, form submission, data extraction
+Limitations: Complex interactions like hover/drag-drop may be unreliable
+
+Example workflow: Start with URL → search for specific product → 
+find product → add to cart → login → share items in cart for logged-in user"""
+    )
+)
+
 async def browser_session(
     action: Literal["start", "execute", "end"] = "execute",
     session_id: Optional[str] = None,
@@ -408,34 +430,30 @@ async def browser_session(
     headless: bool = False,  # Changed default to False
     username: Optional[str] = None,
     password: Optional[str] = None,
-    # embedScreenshot: Optional[bool] = False,  # Removed parameter
-    schema: Optional[dict] = None,
-    debug: Optional[bool] = False
+    schema: Optional[dict] = None
 ) -> str:
     """Control a web browser session via Nova Act agent.
 
-    Perform actions in multiple steps: start a session, execute navigation or agent instructions, and end a session.
+    Performs actions ('start', 'execute', 'end') based on the Nova Act SDK principles.
+    The 'execute' action uses the 'instruction' parameter for **natural language commands**
+    or the 'schema' parameter for data extraction.
 
-    If action == "execute" and no session_id is supplied, a new session is started automatically (defaulting to non-headless).
-
-    NOTE: Screenshot embedding ('embedScreenshot' parameter) has been temporarily disabled
-          in the function signature due to excessive token usage with current LLMs.
-          The underlying screenshot code remains for potential future use or debugging.
-          The path to Nova Act's HTML execution log will be provided in the result if found.
+    Sensitive credentials should be passed via 'username'/'password' parameters for
+    direct Playwright handling, not within the 'instruction' text itself.
 
     Args:
         action: One of "start", "execute", or "end".
-        session_id: Session identifier (not needed for "start").
-        url: Initial or navigation URL.
-        instruction: Instruction text for navigation actions ("execute").
-        headless: Run browser in headless mode when starting (default is False).
-        username: Username text typed directly with Playwright (optional).
-        password: Password text typed directly with Playwright (optional).
-        schema:      Optional JSON schema forwarded to nova.act().
-        debug:       If true, include extra debug keys in the result.
+        session_id: Session identifier (required for 'execute' and 'end').
+        url: Initial URL (required for 'start').
+        instruction: Natural language instruction for the Nova Act agent (for 'execute').
+                     Keep instructions specific and step-by-step.
+        headless: Run browser in headless mode (default: False).
+        username: Username for direct input (use cautiously, see Nova Act docs).
+        password: Password for direct input (use cautiously, see Nova Act docs).
+        schema: Optional JSON schema for data extraction with 'execute'.
 
     Returns:
-        JSON string with action result and session status.
+        JSON string with action result, session status, and path to Nova Act HTML log if found.
     """
     # Ensure environment is initialized
     initialize_environment()
@@ -729,7 +747,7 @@ async def browser_session(
                             )
                         if password:
                             nova_instance.page.fill(
-                                "input#password, input[name='password'], input[type='password']",
+                                "input#password, input[name='password'], input[type='password'], input[name*='pass']",
                                 password,
                                 timeout=5000
                             )
@@ -847,7 +865,6 @@ async def browser_session(
                 # Look for the output HTML file in the logs (only if we used nova.act)
                 html_output_path = None
                 if result and hasattr(result, 'metadata') and result.metadata:
-                    # ... existing HTML path extraction code ...
                     nova_session_id = result.metadata.session_id
                     nova_act_id = result.metadata.act_id
                     
@@ -867,7 +884,6 @@ async def browser_session(
                     
                     # If logs_directory is not set, try to find HTML in temp directory
                     if not logs_dir or not html_output_path:
-                        # ... existing temp directory search code ...
                         temp_dir = tempfile.gettempdir()
                         for root, dirs, files in os.walk(temp_dir):
                             if nova_session_id in root:
@@ -891,18 +907,8 @@ async def browser_session(
                 elif action_handled_directly:
                     debug_info = {"direct_action": True, "action_type": "playwright_direct"}
             
-                # Take a screenshot if requested - DISABLED FOR NOW
-                screenshot_data = None
-                # if embedScreenshot:  # Original condition
-                if False:  # CHANGED: Disable screenshot embedding due to token limits
-                    # Keep the code below for future reference or manual debugging
-                    try:
-                        log(f"[{session_id}] Capturing screenshot (Currently Disabled)...")
-                        # screenshot_bytes = nova_instance.page.screenshot()
-                        # screenshot_data = base64.b64encode(screenshot_bytes).decode('utf-8')
-                        # log(f"[{session_id}] Captured screenshot successfully ({len(screenshot_data)} bytes encoded)")
-                    except Exception as e:
-                        log(f"[{session_id}] Error taking screenshot: {str(e)}")
+                # Take a screenshot - DISABLED 
+                screenshot_data = None  # Ensure it's None
                 
                 # Update session registry with results
                 with session_lock:
@@ -914,7 +920,7 @@ async def browser_session(
                             "response": response_content,
                             "agent_messages": agent_messages,
                             "output_html_paths": output_html_paths,
-                            "screenshot_included": bool(screenshot_data),
+                            "screenshot_included": False,  # Explicitly false
                             "direct_action": action_handled_directly
                         })
                         active_sessions[session_id]["last_updated"] = time.time()
@@ -922,14 +928,11 @@ async def browser_session(
                         active_sessions[session_id]["error"] = None  # Clear previous error on success
                 
                 # Find the first valid HTML log path, if any
-                html_log_path = None
-                if output_html_paths:
-                    # Find the first existing path (in case multiple were found somehow)
-                    for path in output_html_paths:
-                        # Check existence again just to be sure
-                        if path and os.path.exists(path): 
-                            html_log_path = path
-                            break  # Use the first valid one
+                final_html_log_path = None
+                for path in output_html_paths:
+                    if path and os.path.exists(path): 
+                        final_html_log_path = path
+                        break  # Use the first valid one
                 
                 # Format agent thinking for MCP response
                 agent_thinking = []
@@ -944,9 +947,13 @@ async def browser_session(
                 action_type = "direct Playwright" if action_handled_directly else "Nova Act SDK"
                 
                 # Assemble the main text, adding the HTML log path if found
-                main_text = f"Successfully executed via {action_type}: {original_instruction or 'Schema Observation'}\n\nCurrent URL: {updated_url}\nPage Title: {page_title}\nResponse: {json.dumps(response_content)[:500]}..."
-                if html_log_path:
-                    main_text += f"\nNova Act HTML Log Path: {html_log_path}"  # ADDED HTML PATH
+                main_text = (
+                    f"Successfully executed via {action_type}: {original_instruction or 'Schema Observation'}\n\n"
+                    f"Current URL: {updated_url}\nPage Title: {page_title}\n"
+                    f"Response: {json.dumps(response_content)[:500]}..."
+                )
+                if final_html_log_path:
+                    main_text += f"\nNova Act HTML Log Path: {final_html_log_path}"
                 
                 mcp_result = {
                     "content": [
@@ -957,17 +964,17 @@ async def browser_session(
                     ],
                     "agent_thinking": agent_thinking,
                     "isError": False,
-                    "session_id": session_id,  # Include session ID in result
+                    "session_id": session_id,
                     "direct_action": action_handled_directly
                 }
                 
                 # Include debug info if in debug mode
-                if DEBUG_MODE or debug:
+                if DEBUG_MODE:  # Changed to check only env var
                     mcp_result["debug"] = {
-                        "html_paths": output_html_paths,  # Still useful for debug
-                        "html_log_path_selected": html_log_path,  # Show which one we added
+                        "html_paths_found": output_html_paths,
+                        "html_log_path_selected": final_html_log_path,
                         "extraction_info": debug_info,
-                        "response_object": response_content,  # Include raw response for debug
+                        "response_object": response_content,
                         "action_handled_directly": action_handled_directly
                     }
             
