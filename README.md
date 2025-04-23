@@ -99,7 +99,6 @@ The following steps show how to configure the Claude Desktop application. If you
            "run",
            "nova_mcp.py"
          ],
-         "transport": "stdio",
          "env": {
            "NOVA_ACT_API_KEY": "your_api_key_here" // Replace with your Nova Act API key
          }
