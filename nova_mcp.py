@@ -604,17 +604,18 @@ async def browser_session(
             try:
                 profile_dir = os.path.join(PROFILES_DIR, DEFAULT_PROFILE)
                 os.makedirs(profile_dir, exist_ok=True)
-                
+
                 log(f"[{session_id}] Opening browser to {url}")
-                
-                # Create NovaAct instance directly (not using context manager)
+
+                # Create NovaAct instance with proper parameters for your installed version
                 nova_instance = NovaAct(
                     starting_page=url,
                     nova_act_api_key=api_key,
                     user_data_dir=profile_dir,
                     headless=headless
+                    # Removed unsupported parameters: capture_logs and capture_screenshots
                 )
-                
+
                 # --- Explicitly start the client - THIS FIXES THE ERROR ---
                 log(f"[{session_id}] Calling nova_instance.start()...")
                 if hasattr(nova_instance, 'start') and callable(nova_instance.start):
@@ -623,22 +624,22 @@ async def browser_session(
                 else:
                     # This case should ideally not happen based on docs/error
                     log(f"[{session_id}] Warning: nova_instance does not have a callable start() method!")
-                
+
                 # Now it should be safe to access nova_instance.page
                 log(f"[{session_id}] Accessing page properties...")
-                
+
                 # Wait for initial page to load
                 try:
                     nova_instance.page.wait_for_load_state('domcontentloaded', timeout=15000)
                 except Exception as wait_e:
                     log(f"[{session_id}] Info: Initial page wait timed out or errored: {wait_e}")
-                
+
                 # Store NovaAct's own session ID for debugging
                 nova_session_id = None
                 if hasattr(nova_instance, 'session_id'):
                     nova_session_id = nova_instance.session_id
                     log_session_info("NovaAct session started", session_id, nova_session_id)
-                
+
                 # Take a screenshot
                 screenshot_data = None
                 try:
@@ -646,12 +647,12 @@ async def browser_session(
                     screenshot_data = base64.b64encode(screenshot_bytes).decode('utf-8')
                 except Exception as e:
                     log(f"Error taking screenshot: {str(e)}")
-                
+
                 # Get initial page info
                 current_url = nova_instance.page.url
                 page_title = nova_instance.page.title()
                 log(f"[{session_id}] Browser ready at URL: {current_url}")
-                
+
                 # Update session registry with results and store the nova instance
                 with session_lock:
                     if session_id in active_sessions:
@@ -675,7 +676,7 @@ async def browser_session(
                             except Exception:
                                 pass  # Avoid errors during cleanup
                         return None  # Indicate failure to store
-                
+
                 # Create result formatted for JSON-RPC
                 result = {
                     "session_id": session_id,
@@ -683,15 +684,15 @@ async def browser_session(
                     "title": page_title,
                     "status": "ready"
                 }
-                
+
                 return result
-                
+
             except Exception as e:
                 error_message = str(e)
                 error_tb = traceback.format_exc()
                 log(f"[{session_id}] Error during start_browser_session: {error_message}")
                 log(f"Traceback: {error_tb}")
-                
+
                 # Clean up the instance if it was partially created
                 if nova_instance:
                     try:
@@ -702,7 +703,7 @@ async def browser_session(
                             nova_instance.__exit__(None, None, None)
                     except Exception as cleanup_e:
                         log(f"[{session_id}] Error during cleanup after failed start: {cleanup_e}")
-                
+
                 # Update session registry with error
                 with session_lock:
                     if session_id in active_sessions:
@@ -710,7 +711,7 @@ async def browser_session(
                         active_sessions[session_id]["error"] = error_message
                         active_sessions[session_id]["nova_instance"] = None  # Ensure no broken instance is stored
                         active_sessions[session_id]["last_updated"] = time.time()
-                
+
                 # Return the error in JSON-RPC format
                 raise Exception(f"Error starting browser session: {error_message}")
         
