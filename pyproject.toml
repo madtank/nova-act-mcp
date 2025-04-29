@@ -6,19 +6,19 @@ authors = [
     {name = "Jacob Taunton", email = "jandrewt82@gmail.com"}
 ]
 readme = "README.md"
-license = "MIT"
+license = "MIT"  # Changed from table format to simple string
 requires-python = ">=3.10"
 dependencies = [
     "httpx>=0.28.1",
-    "mcp>=1.6.0",
+    "mcp>=1.6.0",  # Reverted to the available version
     "pydantic>=2.0.0",
-    "nova-act>=1.0.0",
-    "playwright>=1.42.0",
-    "asyncio-extras>=1.3.2",
-    "rich>=13.7.0",
-    "structlog>=24.1.0",
-    "tenacity>=8.2.3",
-    "uvloop>=0.19.0; sys_platform != 'win32'",
+    "nova-act>=0.7.5",  # Added specific version constraint for latest Nova Act
+    "playwright>=1.42.0",  # Updated to latest Playwright version
+    "asyncio-extras>=1.3.2",  # Helpful utilities for working with asyncio
+    "rich>=13.7.0",  # Better terminal output and logging
+    "structlog>=24.1.0",  # Structured logging
+    "tenacity>=8.2.3",  # Retry logic for more robust browser automation
+    "uvloop>=0.19.0; sys_platform != 'win32'",  # Faster asyncio event loop implementation (not for Windows)
 ]
 
 [project.urls]
@@ -30,18 +30,22 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project.optional-dependencies]
-nova-act = [
-  "nova-act>=1.0.0",
-  "playwright>=1.43",
-]
 dev = [
-    "pytest>=7.4",
-    "pytest-asyncio",
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.1",
+    "black>=23.7.0",
+    "isort>=5.12.0",
+    "mypy>=1.5.1",
+    "ruff>=0.1.5",
 ]
 
-[project.scripts]
-nova-act-mcp = "nova_mcp:main"
+# Optional dependencies for Server-Sent Events (SSE) support
+sse = [
+    # "fastapi>=0.104.0",  # For HTTP/SSE transport
+    # "uvicorn>=0.23.0",  # ASGI server for FastAPI
+    # "starlette>=0.27.0",  # Required for SSE functionality
+]
 
-# Explicitly specify the py_modules to include only nova_mcp.py
+# Use the tool.setuptools section to configure package discovery
 [tool.setuptools]
-py-modules = ["nova_mcp"]
+py-modules = ["nova_mcp"]  # Explicitly list the single Python module

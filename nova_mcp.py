@@ -15,18 +15,6 @@ from typing import Any, Dict, List, Optional, Literal
 
 # Third-party imports
 from pydantic import BaseModel
-try:
-    # Import from nova_act (for 1.0+ SDK)
-    from nova_act import NovaAct
-except ModuleNotFoundError:
-    try:
-        # Fallback for various older SDK versions
-        from nova_act.playwright.browser import NovaBrowser as NovaAct
-    except ModuleNotFoundError:
-        try:
-            from nova_act.browser import NovaBrowser as NovaAct
-        except ModuleNotFoundError:
-            from nova_act.nova_act import NovaAct
 
 # Local application/library specific imports
 from mcp.server.fastmcp import FastMCP
@@ -620,11 +608,11 @@ async def browser_session(
                 log(f"[{session_id}] Opening browser to {url}")
                 
                 # Create NovaAct instance directly (not using context manager)
-                nova = NovaAct(
-                    url=url,
-                    headless=headless,
-                    capture_logs=True,          # ensures HTML file
-                    capture_screenshots=True
+                nova_instance = NovaAct(
+                    starting_page=url,
+                    nova_act_api_key=api_key,
+                    user_data_dir=profile_dir,
+                    headless=headless
                 )
                 
                 # --- Explicitly start the client - THIS FIXES THE ERROR ---
