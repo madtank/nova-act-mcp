@@ -59,6 +59,17 @@ Before getting started, you'll need:
    # uv add package_name
    ```
 
+### Quick Start with uvx
+
+For the fastest way to get started without cloning the repository or setting up a virtual environment:
+
+```bash
+# No clone, no venv – zero-install test
+uvx nova-act-mcp control_browser --action start --url https://example.com
+```
+
+This uses the Python package manager UVX to directly run the latest version from PyPI.
+
 ## Getting Started
 
 This guide focuses on setting up the server with the Claude Desktop application, but `nova-act-mcp` is designed to work with any Model Context Protocol (MCP) compatible client, such as Visual Studio Code or others. Consult your specific client's documentation for instructions on integrating MCP servers.
@@ -279,22 +290,21 @@ To check for and close any lingering sessions, you can use the `list_browser_ses
 
 The nova-act-mcp server has been configured with some important defaults:
 
-- **Non-Headless Mode by Default**: Browsers now start in non-headless mode (visible) by default, making it easier to observe automation in action. This helps with debugging and monitoring the browser's behavior.
+- **Headless Mode by Default**: Browsers now start in headless mode (invisible) by default, which improves performance and resource usage. This is ideal for production environments and automated workflows.
 
 - **Screenshot Embedding Disabled**: Screenshot embedding has been disabled to prevent excessive token usage in the context window. Large base64-encoded screenshots were causing token explosions, making conversations difficult to maintain.
 
 You can still:
-- Explicitly set `"headless": true` in your requests if you prefer the browser to run invisibly
-- View the browser window directly as it performs actions (since the default is now visible)
+- Explicitly set `"headless": false` in your requests if you want to observe the browser's actions
 - Access Nova Act's HTML logs which are referenced in the response (the path is provided)
 
 **Example:**
 ```
-# Start a visible browser (default)
+# Start a headless browser (default)
 control_browser {"action": "start", "url": "https://www.google.com"}
 
-# Start a headless (invisible) browser by overriding the default
-control_browser {"action": "start", "url": "https://www.google.com", "headless": true}
+# Start a visible browser by overriding the default
+control_browser {"action": "start", "url": "https://www.google.com", "headless": false}
 ```
 
 ### Secure Login Handling
@@ -679,6 +689,80 @@ export NOVA_MCP_DEBUG=1
 
 This will include additional diagnostic information in the responses.
 
+### Common Issues
+
+#### "nova-act is installed but Python can't import it"
+
+This happens because `uv --directory ... run nova_mcp.py` creates a fresh, isolated virtual environment each time it runs. That environment only contains the packages in the current directory (your nova-act-mcp installation), without access to globally installed packages.
+
+**Solution 1: For local development (with a cloned repository)**
+
+Install the "nova-act" extra into the same uv environment before running:
+
+```bash
+# From your nova-act-mcp repository directory
+cd /path/to/nova-act-mcp
+uv pip install -e .[nova-act]   # Pulls nova-act + playwright into the .uv-env folder
+```
+
+Your MCP client configuration can remain unchanged:
+
+```json
+"nova-browser": {
+  "command": "uv",
+  "args": [
+    "--directory",
+    "/path/to/nova-act-mcp",
+    "run",
+    "nova_mcp.py"
+  ],
+  "env": { "NOVA_ACT_API_KEY": "your_api_key_here" }
+}
+```
+
+Once the dependencies are cached in the `.uv-env` folder, every subsequent `uv run` will find nova_act in the Python path.
+
+**Solution 2: Zero-install approach (with uvx)**
+
+For production environments or other machines, use uvx to automatically handle all dependencies:
+
+```toml
+# settings.toml or claude_desktop_config.json
+[servers.nova-browser]
+command   = "uvx"
+args      = ["nova-act-mcp[nova-act]@0.2.0"]  # The [nova-act] extra contains browser automation deps
+transport = "stdio"
+
+[servers.nova-browser.env]
+NOVA_ACT_API_KEY = "${NOVA_ACT_API_KEY}"
+HEADLESS         = "true"  # Optional: run browser in headless mode
+```
+
+With this approach, uvx will:
+1. Download nova-act-mcp version 0.2.0
+2. Detect the [nova-act] extra and automatically install nova-act and playwright
+3. Launch the nova-act-mcp console script in an isolated environment
+
+This requires no pre-installation or path configuration.
+
+#### Clearing the Cache
+
+If you're experiencing persistent issues, try clearing the uv cache:
+
+```bash
+uv cache clear  # Wipes previous temporary environments
+```
+
+#### Verify Installation
+
+To verify that nova-act is correctly installed in your uv environment:
+
+```bash
+uv --directory /path/to/nova-act-mcp run -c "import nova_act; print(f'nova-act version: {nova_act.__version__}')"
+```
+
+If this prints the version without any import errors, your setup is correct.
+
 ## Contributing
 
 We welcome contributions to improve nova-act-mcp! Here's how you can help:
@@ -760,6 +844,60 @@ To update or add dependencies:
 3. Commit both the modified `pyproject.toml` and the updated `uv.lock` file to the repository.
 
 This ensures that all developers and users have consistent dependency versions.
+
+### Local Development Setup
+
+Setting up a local development environment:
+
+1. Create and activate a virtual environment with uv:
+   ```bash
+   # From repo root
+   uv venv .venv
+   
+   # On macOS/Linux
+   source .venv/bin/activate
+   
+   # On Windows
+   .venv\Scripts\activate
+   ```
+
+2. Install the package in development mode with dev dependencies:
+   ```bash
+   uv pip install -e .[dev]
+   ```
+
+3. Verify the installation:
+   ```bash
+   python -m nova_mcp --version
+   ```
+
+4. Run tests to verify everything works:
+   ```bash
+   pytest -q
+   ```
+
+5. For UVX testing (even from within the venv):
+   ```bash
+   uvx nova-act-mcp@0.2.0 --version
+   ```
+
+### Dependency Locking
+
+To ensure reproducible environments:
+
+1. Generate a lockfile (once):
+   ```bash
+   uv pip compile -o uv.lock
+   ```
+
+2. Commit the lockfile to your repository.
+
+3. On new machines or in CI, use:
+   ```bash
+   uv pip sync -r uv.lock
+   ```
+
+This approach prevents dependency issues and ensures consistent behavior across different environments.
 
 ## Future Enhancements
 

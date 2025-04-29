@@ -15,6 +15,18 @@ from typing import Any, Dict, List, Optional, Literal
 
 # Third-party imports
 from pydantic import BaseModel
+try:
+    # Import from nova_act (for 1.0+ SDK)
+    from nova_act import NovaAct
+except ModuleNotFoundError:
+    try:
+        # Fallback for various older SDK versions
+        from nova_act.playwright.browser import NovaBrowser as NovaAct
+    except ModuleNotFoundError:
+        try:
+            from nova_act.browser import NovaBrowser as NovaAct
+        except ModuleNotFoundError:
+            from nova_act.nova_act import NovaAct
 
 # Local application/library specific imports
 from mcp.server.fastmcp import FastMCP
@@ -398,13 +410,70 @@ async def list_browser_sessions() -> str:
     
     return create_jsonrpc_response(request_id, result)
 
+@mcp.tool(
+    name="view_html_log",
+    description=("Render a Nova-Act HTML log file as inline HTML. "
+                 "Provide either 'html_path' (absolute) or a 'session_id' "
+                 "whose last action produced a log.")
+)
+async def view_html_log(
+    html_path: Optional[str] = None,
+    session_id: Optional[str] = None,
+    truncate_to_kb: int = 512
+) -> str:
+    """
+    Stream an HTML log back to the caller so Claude (or other MCP UIs)
+    can embed it.  If both args are given, html_path wins.
+    Large files are truncated to keep JSON-RPC payloads reasonable.
+    """
+    initialize_environment()
+    request_id = getattr(mcp, "request_id", 1)
+
+    # Resolve path from session registry if only session_id given
+    if not html_path and session_id:
+        with session_lock:
+            sess = active_sessions.get(session_id, {})
+            # grab the most recent html path stored in results
+            for r in reversed(sess.get("results", [])):
+                for p in r.get("output_html_paths", []):
+                    if os.path.exists(p):
+                        html_path = p
+                        break
+                if html_path:
+                    break
+
+    if not html_path or not os.path.exists(html_path):
+        return create_jsonrpc_response(
+            request_id,
+            error={
+                "code": -32602,
+                "message": f"HTML log not found: {html_path or session_id}",
+                "data": None,
+            },
+        )
+
+    # Read & (optionally) truncate
+    raw = Path(html_path).read_bytes()
+    if len(raw) > truncate_to_kb * 1024:
+        raw = raw[: truncate_to_kb * 1024] + b"\n<!-- ...truncated... -->"
+
+    # Return as an MCP artifact
+    return create_jsonrpc_response(
+        request_id,
+        {
+            "content": [
+                {"type": "html", "html": raw.decode("utf-8", "ignore")}
+            ],
+            "source_path": html_path,
+        },
+    )
 
 @mcp.tool(
     name="control_browser",
     description=(
         """Controls web browser sessions via Nova Act.
         Actions:
-        - start: Opens browser with required 'url'. Optional 'headless' (default: False). Returns 'session_id'.
+        - start: Opens browser with required 'url'. Optional 'headless' (default: True). Returns 'session_id'.
         - execute: Performs actions with required 'session_id'.
             - 'url': Navigate to a new page (use full URL)
             - 'instruction': Natural language command (e.g., "click login button")
@@ -444,7 +513,7 @@ async def browser_session(
     session_id: Optional[str] = None,
     url: Optional[str] = None,
     instruction: Optional[str] = None,
-    headless: bool = False,  # Changed default to False
+    headless: bool = True,  # Changed default to True
     username: Optional[str] = None,
     password: Optional[str] = None,
     schema: Optional[dict] = None
@@ -464,7 +533,7 @@ async def browser_session(
         url: Initial URL (required for 'start').
         instruction: Natural language instruction for the Nova Act agent (for 'execute').
                      Keep instructions specific and step-by-step.
-        headless: Run browser in headless mode (default: False).
+        headless: Run browser in headless mode (default: True).
         username: Username for direct input (use cautiously, see Nova Act docs).
         password: Password for direct input (use cautiously, see Nova Act docs).
         schema: Optional JSON schema for data extraction with 'execute'.
@@ -551,11 +620,11 @@ async def browser_session(
                 log(f"[{session_id}] Opening browser to {url}")
                 
                 # Create NovaAct instance directly (not using context manager)
-                nova_instance = NovaAct(
-                    starting_page=url,
-                    nova_act_api_key=api_key,
-                    user_data_dir=profile_dir,
-                    headless=headless
+                nova = NovaAct(
+                    url=url,
+                    headless=headless,
+                    capture_logs=True,          # ensures HTML file
+                    capture_screenshots=True
                 )
                 
                 # --- Explicitly start the client - THIS FIXES THE ERROR ---
@@ -611,7 +680,7 @@ async def browser_session(
                         # Need to clean up the instance we just created
                         if nova_instance:
                             try:
-                                if hasattr(nova_instance, 'close') and callable(nova_instance.close): 
+                                if hasattr(nova_instance, 'close') and callable(nova_instance.close):
                                     nova_instance.close()
                                 elif hasattr(nova_instance, '__exit__'): 
                                     nova_instance.__exit__(None, None, None)
@@ -942,7 +1011,7 @@ async def browser_session(
                         })
                         active_sessions[session_id]["last_updated"] = time.time()
                         active_sessions[session_id]["status"] = "browser_ready"  # Ready for next action
-                        active_sessions[session_id]["error"] = None  # Clear previous error on success
+                        active_sessions[session_id]["error"] = None  # Clear previous error
                 
                 # Find the first valid HTML log path, if any
                 final_html_log_path = None
@@ -1033,7 +1102,6 @@ async def browser_session(
             return create_jsonrpc_response(request_id, result)
                 
         except Exception as e:
-            # ... existing error handling code ...
             error_message = str(e)
             error_tb = traceback.format_exc()
             log(f"Error in thread execution: {error_message}")
@@ -1162,7 +1230,36 @@ async def browser_session(
         return create_jsonrpc_response(request_id, error=error)
 
 def main():
-    """Main function to run the MCP server"""
+    """Main function to run the MCP server or display version information"""
+    import argparse
+    import importlib.metadata
+    import sys
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Nova Act MCP Server - FastMCP wrapper for Nova-Act")
+    parser.add_argument('--version', action='store_true', help='Display version information')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
+    parser.add_argument(
+        'tool', nargs='?', default=None,
+        help='Optional tool name (control_browser, list_browser_sessions, ...)'
+    )
+    args, unknown = parser.parse_known_args()
+    
+    # Set debug mode if requested
+    if args.debug:
+        global DEBUG_MODE
+        DEBUG_MODE = True
+        os.environ["NOVA_MCP_DEBUG"] = "1"
+    
+    # Display version and exit if requested
+    if args.version or '--version' in unknown:
+        try:
+            version = importlib.metadata.version("nova-act-mcp")
+            print(f"nova-act-mcp version {version}")
+        except importlib.metadata.PackageNotFoundError:
+            print("nova-act-mcp (development version)")
+        return
+    
     # Perform initialization and logging only when actually running the server
     initialize_environment()
     
@@ -1186,6 +1283,7 @@ def main():
     
     log("- Tool: list_browser_sessions - List all active and recent web browser sessions ✓")
     log("- Tool: control_browser - Manage and interact with web browser sessions via Nova Act agent ✓")
+    log("- Tool: view_html_log - View HTML logs from browser sessions ✓")
     
     log("\nStarting MCP server...")
     # Initialize and run the server
