@@ -14,6 +14,7 @@ dependencies = [
     "pydantic>=2.11.4",
     "nova-act>=1.0.2408.0",
     "playwright==1.48.0",  # Pinned to match nova-act's requirement
+    "fastmcp==2.2.5",      # Added for FastMCP v2 support
     "asyncio-extras>=1.3.2",
     "rich>=14.0.0",
     "structlog>=25.3.0",
@@ -37,6 +38,8 @@ dev = [
     "isort>=6.0.1",
     "mypy>=1.15.0",
     "ruff>=0.11.7",
+    "pytest-dotenv>=0.5.2", # Automatically load .env files for pytest
+    "python-dotenv>=1.0.0", # Load .env files in Python
 ]
 
 # Optional dependencies for Server-Sent Events (SSE) support
@@ -49,3 +52,14 @@ sse = [
 # Use the tool.setuptools section to configure package discovery
 [tool.setuptools]
 py-modules = ["nova_mcp"]  # Explicitly list the single Python module
+
+# Pytest configuration
+[tool.pytest.ini_options]
+# Silence specific warnings
+filterwarnings = [
+    # Ignore the Pydantic warning about schema field shadowing
+    "ignore:Field name \"schema\" in \"browser_sessionArguments\" shadows an attribute in parent \"ArgModelBase\":UserWarning",
+    # Ignore the thread exception from the keyboard event watcher
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning"
+]
+asyncio_mode = "strict"  # Set the asyncio mode for pytest-asyncio
