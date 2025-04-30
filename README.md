@@ -604,6 +604,40 @@ When working with browser automation at scale, keep these performance considerat
 
 ## Testing
 
+### Setting Up Your Test Environment
+
+Before running tests, ensure you have all the required testing dependencies installed:
+
+```bash
+# Install development dependencies including testing packages
+uv sync --extra dev
+
+# Verify test dependencies are installed
+uv pip list | grep pytest
+```
+
+This will install pytest and all related testing packages defined in the `[project.optional-dependencies]` section of your `pyproject.toml`.
+
+### Running Tests
+
+You can test the nova-act-mcp server in several ways:
+
+#### 1. Running Specific Test Files with Detailed Output
+
+For detailed test output with verbose logging, use the `-v` flag. To see print statements in your tests, add the `-s` flag:
+
+```bash
+# Run a specific test file with verbose output and print statements
+python -m pytest -v -s tests/test_nova_mcp_integration.py
+
+# Run all tests with verbose output
+python -m pytest -v
+
+
+The `-s` flag is particularly useful for debugging as it allows print statements in your tests to be displayed in the console.
+
+#### 2. Using the MCP Inspector Tool
+
 You can test the nova-act-mcp server using the MCP Inspector tool:
 
 ```bash

@@ -11,7 +11,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Dict, Optional, Literal
+from typing import Any, Dict, Optional, Literal, List
 
 # Third-party imports
 from pydantic import BaseModel
@@ -272,144 +272,125 @@ def create_jsonrpc_response(id, result=None, error=None):
 DEBUG_MODE = os.environ.get("NOVA_MCP_DEBUG", "0") == "1"
 
 
-def extract_agent_thinking(result, nova=None, logs_dir=None, instruction=None):
+def extract_agent_thinking(result, nova=None, html_path_to_parse=None, instruction=None):
     """
     Extract agent thinking from Nova Act results using multiple methods.
+    Prioritizes direct fields, then captures logs immediately, then falls back to HTML parsing.
     """
     agent_messages = []
     extraction_methods_tried = []
     debug_info = {}
-
-    # Method 1: Direct attributes (unchanged)
-
-    # Method 2: Parse HTML output file - Updated regex pattern!
-    extraction_methods_tried.append("html_file")
-    if hasattr(result, "metadata") and result.metadata:
-        nova_session_id = result.metadata.session_id
-        nova_act_id = result.metadata.act_id
-        debug_info["nova_session_id"] = nova_session_id
-        debug_info["nova_act_id"] = nova_act_id
-
-        # Get logs directory
-        if not logs_dir and nova and hasattr(nova, "logs_directory"):
-            logs_dir = nova.logs_directory
-
-        # Try both direct path and searching through temp directories
-        html_paths = []
-
-        # Direct path attempt
-        if logs_dir and nova_session_id and nova_act_id:
-            direct_path = os.path.join(
-                logs_dir, nova_session_id, f"act_{nova_act_id}_output.html"
-            )
-            if os.path.exists(direct_path):
-                html_paths.append(direct_path)
-
-        # Search in temp directories
-        temp_dir = tempfile.gettempdir()
-        for root, dirs, files in os.walk(temp_dir):
-            if nova_session_id in root:
-                for file in files:
-                    if file.startswith(f"act_{nova_act_id}") and file.endswith(
-                        "_output.html"
-                    ):
-                        html_paths.append(os.path.join(root, file))
-
-        debug_info["html_paths_found"] = html_paths
-
-        # Process all found HTML files
-        for html_path in html_paths:
-            log(f"Parsing HTML file: {html_path}")
-            try:
-                with open(html_path, "r") as f:
-                    html_content = f.read()
-
-                # Log a snippet for debugging
-                log(f"HTML snippet (first 100 chars): {html_content[:100]}")
-
-                # Updated pattern to match both formats
-                think_patterns = re.findall(
-                    r'(?:\w+> )?think\("([^"]*)"\);?', html_content, re.DOTALL
-                )
-
-                # Also try a more direct approach looking for pre tags
-                if not think_patterns:
-                    # This is a simple pattern that might work with the HTML structure
-                    think_patterns = re.findall(
-                        r'<pre[^>]*>(?:\w+> )?think\("([^"]*?)"\);?</pre>',
-                        html_content,
-                        re.DOTALL,
-                    )
-
-                # Process extracted patterns
-                for pattern in think_patterns:
-                    # Clean up the content
-                    cleaned = pattern.replace("\\n", "\n").replace('\\"', '"')
+    
+    # Helper function to clean thought strings
+    def _clean_thought(t: str) -> str:
+        return t.strip().replace("\\n", "\n")
+    
+    # Method 1: Direct fields (result.metadata.thinking, result.thoughts)
+    extraction_methods_tried.append("direct_fields")
+    if result:
+        # Try result.metadata.thinking
+        if hasattr(result, "metadata") and hasattr(result.metadata, "thinking") and result.metadata.thinking:
+            log(f"Found thinking in result.metadata.thinking")
+            for t in result.metadata.thinking:
+                cleaned = _clean_thought(t)
+                if cleaned and cleaned not in agent_messages:
                     agent_messages.append(cleaned)
-
-                log(f"Extracted {len(think_patterns)} thinking patterns from HTML")
-                debug_info["html_patterns_found"] = think_patterns
-                debug_info["source"] = "html_file"
-
-                # If we found thinking, break out of the loop
-                if think_patterns:
-                    break
-
-            except Exception as e:
-                log(f"Error parsing HTML file: {str(e)}")
-                debug_info["html_error"] = str(e)
-
-    # Method 3: Parse logs directly (updated pattern)
-    extraction_methods_tried.append("direct_logs")
-    if (
-        not agent_messages
-        and nova
-        and hasattr(nova, "get_logs")
-        and callable(getattr(nova, "get_logs", None))
-    ):
+        
+        # Try result.thoughts
+        if hasattr(result, "thoughts") and result.thoughts:
+            log(f"Found thinking in result.thoughts")
+            for t in result.thoughts:
+                cleaned = _clean_thought(t)
+                if cleaned and cleaned not in agent_messages:
+                    agent_messages.append(cleaned)
+    
+    # Method 2: Raw log buffer - capture immediately
+    extraction_methods_tried.append("raw_logs")
+    if not agent_messages and nova and callable(getattr(nova, "get_logs", None)):
         try:
-            logs = nova.get_logs()
-            debug_info["log_count"] = len(logs)
-
+            raw_logs = nova.get_logs()  # Get logs immediately after act()
+            
+            # IMPORTANT FIX: Handle if raw_logs is a string rather than a list
+            if isinstance(raw_logs, str):
+                raw_logs = raw_logs.splitlines()
+                
+            log(f"Got {len(raw_logs)} raw log lines from nova.get_logs()")
             think_count = 0
-            for log_line in logs:
-                if 'think("' in log_line:
-                    # Updated pattern to handle session prefixes
-                    thinking_match = re.search(
-                        r'(?:\w+> )?think\("([^"]*)"\)', log_line
-                    )
-                    if thinking_match:
-                        thought = (
-                            thinking_match.group(1)
-                            .replace("\\n", "\n")
-                            .replace('\\"', '"')
-                        )
-                        if thought not in agent_messages:
-                            agent_messages.append(thought)
-                            think_count += 1
-
+            
+            for line in raw_logs:
+                # IMPROVED: More flexible pattern that handles whitespace and captures all content
+                m = re.search(r'\bthink\s*\(\s*[\'"]([\s\S]*?)[\'"]\s*\)', line)
+                if m:
+                    cleaned = _clean_thought(m.group(1))
+                    if cleaned and cleaned not in agent_messages:
+                        agent_messages.append(cleaned)
+                        think_count += 1
+            
+            log(f"Extracted {think_count} thinking patterns from raw logs")
             if think_count > 0:
-                debug_info["source"] = "direct_logs"
+                debug_info["source"] = "raw_logs"
                 debug_info["think_patterns_found"] = think_count
         except Exception as e:
-            log(f"Error parsing logs: {str(e)}")
-            debug_info["logs_error"] = str(e)
-
-    # Method 4 (unchanged)
-
-    # Fallback method (unchanged)
-
+            log(f"Error extracting from raw logs: {str(e)}")
+            debug_info["raw_logs_error"] = str(e)
+    
+    # Method 3: HTML Log - only if still empty
+    extraction_methods_tried.append("html_file")
+    if not agent_messages and html_path_to_parse and os.path.exists(html_path_to_parse):
+        log(f"Parsing HTML file for thinking: {html_path_to_parse}")
+        debug_info["html_path_parsed"] = html_path_to_parse
+        try:
+            import html
+            # Read the HTML file
+            with open(html_path_to_parse, "r", encoding="utf-8", errors="ignore") as f:
+                html_content = f.read()
+            
+            # Replace escaped quotes before unescaping HTML
+            html_content = html_content.replace('\\"', '"')
+            
+            # 1. Unescape HTML entities (convert &quot; back to ", etc.)
+            unescaped_content = html.unescape(html_content)
+            
+            # 2. Remove HTML tags
+            text_content = re.sub(r'<[^>]*>', ' ', unescaped_content)
+            
+            # 3. IMPROVED: Search for thinking patterns - more flexible pattern that handles everything
+            think_count = 0
+            for m in re.finditer(r'\bthink\s*\(\s*[\'"]([\s\S]*?)[\'"]\s*\)', text_content, re.DOTALL):
+                cleaned = _clean_thought(m.group(1))
+                if cleaned and cleaned not in agent_messages:
+                    agent_messages.append(cleaned)
+                    think_count += 1
+            
+            # Log results
+            log(f"Extracted {think_count} thinking patterns from HTML")
+            debug_info["html_patterns_found_count"] = think_count
+            debug_info["source"] = "html_file" if think_count > 0 else debug_info.get("source")
+            
+        except Exception as e:
+            log(f"Error parsing HTML file {html_path_to_parse}: {str(e)}")
+            debug_info["html_error"] = str(e)
+    
+    # Add fallback methods only if we still haven't found anything
+    if not agent_messages:
+        # Method 4: Check result.response if it's a string (unchanged)
+        extraction_methods_tried.append("result_response")
+        if hasattr(result, "response") and isinstance(result.response, str):
+            agent_messages.append(result.response)
+    
+    # Log summary
     debug_info["extraction_methods"] = extraction_methods_tried
     debug_info["message_count"] = len(agent_messages)
-
+    log(f"Final agent thinking message count: {len(agent_messages)}")
+    
     return agent_messages, debug_info
 
 
 @mcp.tool(
     name="list_browser_sessions",
-    description="List all active and recent web browser sessions managed by Nova Act agent",
+    description="List all active and recent web browser sessions managed by Nova Act agent"
 )
-async def list_browser_sessions() -> str:
+async def list_browser_sessions() -> Dict[str, Any]:
     """List all active and recent web browser sessions managed by Nova Act agent.
 
     Returns a JSON string with session IDs, status, progress, and error details for each session.
@@ -422,6 +403,7 @@ async def list_browser_sessions() -> str:
     # Clean up old completed sessions that are more than 10 minutes old
     current_time = time.time()
     with session_lock:
+        # Use list() to avoid modifying dict during iteration
         for session_id, session_data in list(active_sessions.items()):
             # Only clean up sessions that are marked complete and are old
             if session_data.get("complete", False) and (
@@ -463,9 +445,6 @@ async def list_browser_sessions() -> str:
         "total_count": len(sessions),
     }
 
-    # Get the request ID from the MCP context if available
-    request_id = getattr(mcp, "request_id", 1)
-
     return result  # FastMCP will wrap this
 
 
@@ -481,47 +460,94 @@ async def view_html_log(
     html_path: Optional[str] = None,
     session_id: Optional[str] = None,
     truncate_to_kb: int = 512,
-) -> str:
+) -> Dict[str, Any]:
     """
     Stream an HTML log back to the caller so Claude (or other MCP UIs)
-    can embed it.  If both args are given, html_path wins.
+    can embed it. If both args are given, html_path wins.
     Large files are truncated to keep JSON-RPC payloads reasonable.
+    Returns a dictionary representing a JSON-RPC result or error.
     """
+
     initialize_environment()
-    request_id = getattr(mcp, "request_id", 1)
+    # request_id = getattr(mcp, "request_id", 1) # Not needed for return value
 
     # Resolve path from session registry if only session_id given
+    found_path = None
     if not html_path and session_id:
         with session_lock:
             sess = active_sessions.get(session_id, {})
-            # grab the most recent html path stored in results
+            # Grab the most recent *list* of html paths stored in results
             for r in reversed(sess.get("results", [])):
-                for p in r.get("output_html_paths", []):
-                    if os.path.exists(p):
-                        html_path = p
-                        break
-                if html_path:
-                    break
+                # Ensure we look for the key where absolute paths are stored
+                potential_paths = r.get("output_html_paths", []) # Key should match storage
+                if potential_paths:
+                    # Check each absolute path in the list for existence
+                    for p in potential_paths:
+                        # Ensure p is a non-empty string before checking existence
+                        if isinstance(p, str) and p and os.path.exists(p):
+                            found_path = p
+                            log(f"Found existing HTML log via session results: {found_path}")
+                            break # Found a valid path in this result entry
+                    if found_path:
+                        break # Stop searching backwards once a valid path is found
+        html_path = found_path # Assign the found absolute path
 
-    if not html_path or not os.path.exists(html_path):
+    # If html_path was provided directly, ensure it's absolute and exists
+    elif html_path:
+        absolute_provided_path = os.path.abspath(html_path)
+        if not os.path.exists(absolute_provided_path):
+             log(f"Provided HTML log path does not exist: {absolute_provided_path}")
+             # Return JSON-RPC error structure
+             return {
+                "error": {
+                    "code": -32602, # Invalid params
+                    "message": f"Provided HTML log path does not exist: {absolute_provided_path}",
+                    "data": None,
+                }
+            }
+        html_path = absolute_provided_path # Use the validated absolute path
+
+    # Check if we actually found or validated a path
+    if not html_path:
+        error_detail = f"session_id: {session_id}" if session_id else "no identifier provided"
+        log(f"Could not find an existing HTML log for {error_detail}")
+        # Return JSON-RPC error structure
         return {
             "error": {
-                "code": -32602,
-                "message": f"HTML log not found: {html_path or session_id}",
+                "code": -32602, # Invalid params
+                "message": f"Could not find an existing HTML log for {error_detail}",
                 "data": None,
             }
         }
+    # Path existence is checked above, no need for redundant check here
 
     # Read & (optionally) truncate
-    raw = Path(html_path).read_bytes()
-    if len(raw) > truncate_to_kb * 1024:
-        raw = raw[: truncate_to_kb * 1024] + b"\n<!-- ...truncated... -->"
+    try:
+        raw = Path(html_path).read_bytes()
+        truncated = False
+        if len(raw) > truncate_to_kb * 1024:
+            raw = raw[: truncate_to_kb * 1024] + b"\\n<!-- ...truncated... -->"
+            truncated = True
 
-    # Return as an MCP artifact
-    return {
-        "content": [{"type": "html", "html": raw.decode("utf-8", "ignore")}],
-        "source_path": html_path,
-    }
+        # Return as an MCP artifact (JSON-RPC result structure)
+        log(f"Returning HTML content from {html_path} (truncated: {truncated})")
+        # IMPORTANT: FastMCP expects the function to return the *value* for the "result" key
+        # It will automatically wrap it in {"jsonrpc": "2.0", "id": ..., "result": ...}
+        # So, we return the dictionary that should go *inside* "result"
+        return {
+            "content": [{"type": "html", "html": raw.decode("utf-8", "ignore")}],
+            "source_path": html_path,
+            "truncated": truncated
+        }
+    except Exception as e:
+        log(f"Error reading HTML log file {html_path}: {e}")
+        # For errors, FastMCP expects a dictionary matching the JSON-RPC error object structure
+        # to be returned, which it will place inside the "error" key.
+        return {
+            "code": -32603, # Internal error
+            "message": f"Error reading HTML log file: {e}",
+            "data": {"path": html_path},
+        }
 
 
 @mcp.tool(
@@ -572,11 +598,12 @@ async def browser_session(
     username: Optional[str] = None,
     password: Optional[str] = None,
     schema: Optional[dict] = None,
-) -> str:
-    """Control a web browser session via Nova Act agent.
+) -> Dict[str, Any]:
+    """
+    Control a web browser session via Nova Act agent.
 
     Performs actions ('start', 'execute', 'end') based on the Nova Act SDK principles.
-    The 'execute' action uses the 'instruction' parameter for **natural language commands**
+    The 'execute' action uses the 'instruction' parameter for natural language commands
     or the 'schema' parameter for data extraction.
 
     Sensitive credentials should be passed via 'username'/'password' parameters for
@@ -594,8 +621,9 @@ async def browser_session(
         schema: Optional JSON schema for data extraction with 'execute'.
 
     Returns:
-        JSON string with action result, session status, and path to Nova Act HTML log if found.
+        A dictionary representing the JSON-RPC result or error.
     """
+
     # Ensure environment is initialized
     initialize_environment()
 
@@ -641,7 +669,6 @@ async def browser_session(
             "current_action": "initializing",
             "is_complete": False,
             "last_update": time.time(),
-            "error": None,
         }
 
         # Register this session in the global registry
@@ -887,10 +914,8 @@ async def browser_session(
         def execute_instruction():
             original_instruction = instruction  # Keep original for logging/reporting
             instruction_to_execute = instruction  # This one might be modified
-            output_html_paths = []  # Keep track of HTML output paths
-            action_handled_directly = (
-                False  # Flag to track if we used Playwright directly
-            )
+            absolute_html_output_paths = [] # Store absolute paths here
+            action_handled_directly = False
 
             try:
                 # If a URL is provided for execute, navigate first
@@ -1094,51 +1119,85 @@ async def browser_session(
                 log(f"[{session_id}] Action completed. Current URL: {updated_url}")
 
                 # Look for the output HTML file in the logs (only if we used nova.act)
-                html_output_path = None
+                html_output_path = None # Temporary variable for path finding
+                log(f"[{session_id}] Attempting to find HTML output path...") # ADDED LOG
                 if result and hasattr(result, "metadata") and result.metadata:
                     nova_session_id = result.metadata.session_id
                     nova_act_id = result.metadata.act_id
+                    log(f"[{session_id}] Found metadata: nova_session_id={nova_session_id}, nova_act_id={nova_act_id}") # ADDED LOG
 
-                    # Try to get the HTML output path
+                    # Try to get the HTML output path from logs_directory
                     logs_dir = (
                         nova_instance.logs_directory
                         if hasattr(nova_instance, "logs_directory")
                         else None
                     )
+                    log(f"[{session_id}] Using logs_dir: {logs_dir}") # ADDED LOG
 
                     if logs_dir and nova_session_id and nova_act_id:
                         possible_html_path = os.path.join(
                             logs_dir, nova_session_id, f"act_{nova_act_id}_output.html"
                         )
-                        if os.path.exists(possible_html_path):
-                            html_output_path = possible_html_path
-                            output_html_paths.append(html_output_path)
-                            log(f"Found HTML output path: {html_output_path}")
+                        log(f"[{session_id}] Constructed possible_html_path: {possible_html_path}") # ADDED LOG
+                        path_exists = os.path.exists(possible_html_path) # ADDED Check
+                        log(f"[{session_id}] Does path exist? {path_exists}") # ADDED LOG
+                        if path_exists:
+                            html_output_path = os.path.abspath(possible_html_path) # Get absolute path
+                            if html_output_path not in absolute_html_output_paths:
+                                absolute_html_output_paths.append(html_output_path) # Store absolute path
+                            log(f"[{session_id}] Found and stored absolute HTML output path: {html_output_path}") # MODIFIED LOG
 
-                    # If logs_directory is not set, try to find HTML in temp directory
-                    if not logs_dir or not html_output_path:
+                    # If logs_directory is not set or path not found, try temp directory
+                    if not html_output_path:
+                        log(f"[{session_id}] Path not found in logs_dir, searching temp dir...")
                         temp_dir = tempfile.gettempdir()
+                        log(f"[{session_id}] Temp directory: {temp_dir}")
+                        
+                        # Broader search for HTML logs
                         for root, dirs, files in os.walk(temp_dir):
-                            if nova_session_id in root:
+                            # Look for directories that contain 'nova_act_logs' in the path
+                            # Less restrictive - don't require exact session ID match
+                            if 'nova_act_logs' in root:
+                                log(f"[{session_id}] Found nova_act_logs directory: {root}")
                                 for file in files:
-                                    if file.startswith(
-                                        f"act_{nova_act_id}"
-                                    ) and file.endswith("_output.html"):
-                                        html_output_path = os.path.join(root, file)
-                                        output_html_paths.append(html_output_path)
-                                        log(
-                                            f"Found HTML output path in temp dir: {html_output_path}"
-                                        )
-                                        break
+                                    if file.endswith("_output.html"):
+                                        log(f"[{session_id}] Found potential output HTML: {file}")
+                                        temp_path = os.path.join(root, file)
+                                        if os.path.exists(temp_path): 
+                                            abs_temp_path = os.path.abspath(temp_path)
+                                            file_mtime = os.path.getmtime(temp_path)
+                                            # Add creation time to sort newest files first
+                                            log(f"[{session_id}] Found HTML file: {abs_temp_path} (modified: {file_mtime})")
+                                            if abs_temp_path not in absolute_html_output_paths:
+                                                absolute_html_output_paths.append(abs_temp_path)
+                                                log(f"[{session_id}] Added HTML file to results list")
+                            # Don't search too deeply - only go one level deeper in matching directories
+                            if 'nova_act_logs' not in root:
+                                # Remove directories that don't seem promising
+                                dirs[:] = [d for d in dirs if 'nova' in d.lower() or 'act' in d.lower() or 'log' in d.lower() or 'tmp' in d.lower()]
+                            
+                        # If we found multiple paths, sort by modification time (newest first)
+                        if len(absolute_html_output_paths) > 1:
+                            absolute_html_output_paths.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+                            log(f"[{session_id}] Sorted {len(absolute_html_output_paths)} HTML logs by modification time")
+                else:
+                     log(f"[{session_id}] No result or result.metadata found. Cannot search for HTML path.") # ADDED LOG
 
                 # Extract agent thinking (only if we used nova.act)
                 agent_messages = []
                 debug_info = {}
-                if result:
+                
+                # --- Always sort collected HTML log paths by mtime (newest first) ---
+                if absolute_html_output_paths:
+                    absolute_html_output_paths.sort(key=os.path.getmtime, reverse=True)
+                
+                # Pass the *first found* absolute path to the extraction function
+                found_log_path_for_thinking = absolute_html_output_paths[0] if absolute_html_output_paths else None
+                if result: # Only try extraction if nova.act was called
                     agent_messages, debug_info = extract_agent_thinking(
                         result,
                         nova_instance,
-                        logs_dir if "logs_dir" in locals() else None,
+                        found_log_path_for_thinking, # Pass the specific path found
                         instruction_to_execute,
                     )
                 elif action_handled_directly:
@@ -1147,16 +1206,19 @@ async def browser_session(
                         "action_type": "playwright_direct",
                     }
 
-                # Take a screenshot - DISABLED
-                screenshot_data = None  # Ensure it's None
+                # Screenshot code remains disabled
+                screenshot_data = None
 
-                # Update session registry with results
+                # Update session registry with results - USE ABSOLUTE PATHS
                 with session_lock:
                     if session_id in active_sessions:
                         active_sessions[session_id]["url"] = updated_url
+                        # Ensure results list exists
+                        if "results" not in active_sessions[session_id]:
+                             active_sessions[session_id]["results"] = []
                         active_sessions[session_id]["results"].append(
                             {
-                                "action": original_instruction,  # Log the original requested action
+                                "action": original_instruction,
                                 "executed": (
                                     instruction_to_execute
                                     if not action_handled_directly
@@ -1164,102 +1226,98 @@ async def browser_session(
                                 ),
                                 "response": response_content,
                                 "agent_messages": agent_messages,
-                                "output_html_paths": output_html_paths,
-                                "screenshot_included": False,  # Explicitly false
+                                "output_html_paths": absolute_html_output_paths, # Store absolute paths list
+                                "screenshot_included": False,
                                 "direct_action": action_handled_directly,
+                                "timestamp": time.time() # Add timestamp for easier debugging
                             }
                         )
                         active_sessions[session_id]["last_updated"] = time.time()
-                        active_sessions[session_id][
-                            "status"
-                        ] = "browser_ready"  # Ready for next action
-                        active_sessions[session_id][
-                            "error"
-                        ] = None  # Clear previous error
+                        active_sessions[session_id]["status"] = "browser_ready"
+                        active_sessions[session_id]["error"] = None
+                    else:
+                         log(f"[{session_id}] Session disappeared before results could be stored.")
 
-                # Find the first valid HTML log path, if any
-                final_html_log_path = None
-                for path in output_html_paths:
+
+                # Find the first valid HTML log path from the stored list for reporting
+                final_html_log_path_for_reporting = None
+                for path in absolute_html_output_paths:
                     if path and os.path.exists(path):
-                        final_html_log_path = path
-                        break  # Use the first valid one
+                        final_html_log_path_for_reporting = path
+                        break
 
                 # Format agent thinking for MCP response
-                agent_thinking = []
+                agent_thinking_mcp = [] # Use different variable name to avoid confusion
                 for message in agent_messages:
-                    agent_thinking.append(
+                    agent_thinking_mcp.append(
                         {"type": "reasoning", "content": message, "source": "nova_act"}
                     )
 
-                # Create result properly formatted for JSON-RPC
+                # Create result properly formatted for JSON-RPC result field
                 action_type = (
                     "direct Playwright" if action_handled_directly else "Nova Act SDK"
                 )
 
                 # Assemble the main text, adding the HTML log path if found
                 main_text = (
-                    f"Successfully executed via {action_type}: {original_instruction or 'Schema Observation'}\n\n"
-                    f"Current URL: {updated_url}\nPage Title: {page_title}\n"
-                    f"Response: {json.dumps(response_content)[:5000]}..."
+                    f"Successfully executed via {action_type}: {original_instruction or 'Schema Observation'}\\n\\n"
+                    f"Current URL: {updated_url}\\nPage Title: {page_title}\\n"
+                    # Limit response content length in main text
+                    f"Response: {json.dumps(response_content)[:1000]}{'...' if len(json.dumps(response_content)) > 1000 else ''}"
                 )
-                if final_html_log_path:
-                    main_text += f"\nNova Act HTML Log Path: {final_html_log_path}"
+                if final_html_log_path_for_reporting:
+                    main_text += f"\\nNova Act HTML Log Path (for server reference): {final_html_log_path_for_reporting}"
 
-                mcp_result = {
+                # This is the dictionary that goes into the "result" field of the JSON-RPC response
+                mcp_result_value = {
                     "content": [{"type": "text", "text": main_text}],
-                    "agent_thinking": agent_thinking,
+                    "agent_thinking": agent_thinking_mcp, # Use the formatted list
                     "isError": False,
                     "session_id": session_id,
                     "direct_action": action_handled_directly,
-                    "success": True,
+                    "success": True, # Indicate logical success of the operation
+                    "current_url": updated_url, # Add current URL for context
+                    "page_title": page_title, # Add page title for context
                 }
 
                 # Include debug info if in debug mode
-                if DEBUG_MODE:  # Changed to check only env var
-                    mcp_result["debug"] = {
-                        "html_paths_found": output_html_paths,
-                        "html_log_path_selected": final_html_log_path,
+                if DEBUG_MODE:
+                    mcp_result_value["debug"] = {
+                        "html_paths_found": absolute_html_output_paths,
+                        "html_log_path_selected_for_reporting": final_html_log_path_for_reporting,
                         "extraction_info": debug_info,
-                        "response_object": response_content,
-                        "action_handled_directly": action_handled_directly,
+                        # Avoid putting potentially large response object in debug if already in main text
+                        # "response_object": response_content,
                     }
 
-                return mcp_result
+                return mcp_result_value # Return the dictionary for the "result" field
 
-            # Refined Error Handling
-            except ActGuardrailsError as e:
-                error_message = f"Guardrail triggered: {str(e)}"
-                error_type = "Guardrails"
-                error_tb = traceback.format_exc()
-            except ActError as e:
-                error_message = f"Nova Act execution error: {str(e)}"
-                error_type = "NovaAct"
-                error_tb = traceback.format_exc()
-            except Exception as e:
-                error_message = f"General execution error: {str(e)}"
+            except (ActGuardrailsError, ActError, Exception) as e:
+                # Refined Error Handling
+                error_message = f"Execution error: {str(e)}"
                 error_type = "General"
                 error_tb = traceback.format_exc()
 
-            # Common Error Logging and Update - unchanged
-            log(f"[{session_id}] Error ({error_type}): {error_message}")
-            log(f"Traceback: {error_tb}")
-            with session_lock:
-                if session_id in active_sessions:
-                    active_sessions[session_id]["status"] = "error"
-                    active_sessions[session_id]["error"] = error_message
-                    active_sessions[session_id]["last_updated"] = time.time()
-            # Propagate error message to be caught by the main handler
-            raise Exception(f"({error_type}) {error_message}")
+                # Common Error Logging and Update - unchanged
+                log(f"[{session_id}] Error ({error_type}): {error_message}")
+                log(f"Traceback: {error_tb}")
+                with session_lock:
+                    if session_id in active_sessions:
+                        active_sessions[session_id]["status"] = "error"
+                        active_sessions[session_id]["error"] = error_message
+                        active_sessions[session_id]["last_updated"] = time.time()
+
+                # Ensure the exception raised contains the error message
+                raise Exception(f"({error_type}) {error_message}") from e
 
         # Run the synchronous code in the session's dedicated thread
         try:
             # Use run_in_executor to run the synchronous code in the session's thread
-            result = await asyncio.get_event_loop().run_in_executor(
+            result_value = await asyncio.get_event_loop().run_in_executor(
                 executor, execute_instruction
             )
-
-            # Return the result directly
-            return result
+            # FastMCP expects the result value directly
+            return result_value
 
         except Exception as e:
             error_message = str(e)
@@ -1267,13 +1325,13 @@ async def browser_session(
             log(f"Error in thread execution: {error_message}")
             log(f"Traceback: {error_tb}")
 
-            error = {
+            # FastMCP expects the error dictionary directly
+            error_obj = {
                 "code": -32603,
                 "message": f"Error executing instruction: {error_message}",
                 "data": {"session_id": session_id},
             }
-
-            return {"error": error}
+            return error_obj # Return the error dictionary
 
     # Handle the "end" action
     elif action == "end":
@@ -1446,7 +1504,7 @@ def main():
 
     # Get the API key and update the status message
     api_key = get_nova_act_api_key()
-    if api_key:
+    if (api_key):
         log("- API Key: Found in configuration ✓")
     else:
         log("- API Key: Not found ❌")
