@@ -31,7 +31,8 @@ jobs:
     - name: Install dependencies including dev extras
       run: |
         # Install the package itself in editable mode along with dev dependencies
-        uv pip install -e .[dev]
+        # Add --system flag to install into the runner's Python environment
+        uv pip install --system -e .[dev]
 
     - name: Run tests
       run: |
