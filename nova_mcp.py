@@ -12,6 +12,8 @@ import time
 import traceback
 from pathlib import Path
 from typing import Any, Dict, Optional, Literal, List
+import shutil # Added for directory removal
+import uuid # Added for unique session dirs
 
 # Third-party imports
 from pydantic import BaseModel
@@ -27,9 +29,9 @@ DEFAULT_TIMEOUT = 180  # 3 minutes per step
 PROGRESS_INTERVAL = 5  # Send progress updates every 5 seconds
 MAX_RETRY_ATTEMPTS = 2  # Maximum retry attempts for failed steps
 
-# User profiles directory
-PROFILES_DIR = "./profiles"
-DEFAULT_PROFILE = "default"  # Default profile name to use
+# User profiles directory - Now determined dynamically
+# PROFILES_DIR = "./profiles" # Removed
+DEFAULT_PROFILE_IDENTITY = "default"  # Default identity name if none provided
 
 # Global browser session registry - add type hint for clarity
 active_sessions: Dict[str, Dict[str, Any]] = {}
@@ -215,6 +217,21 @@ def get_nova_act_api_key():
         return os.environ.get("NOVA_ACT_API_KEY")
 
 
+# Helper function to determine the root directory for browser profiles
+def _profile_root() -> Path:
+    """Determine the root directory for browser profiles."""
+    # 1) Caller can force a location via environment variable
+    override = os.getenv("NOVA_ACT_PROFILE_DIR")
+    if (override):
+        log(f"Using profile directory override from NOVA_ACT_PROFILE_DIR: {override}")
+        return Path(override).expanduser()
+
+    # 2) Otherwise use OS-temp (always writable in Claude / uvx)
+    default_path = Path(tempfile.gettempdir()) / "nova_act_mcp_profiles"
+    log(f"Using default profile directory in temp: {default_path}")
+    return default_path
+
+
 def initialize_environment():
     """Initialize the environment and do setup that might produce output"""
     global _logging_initialized
@@ -231,8 +248,8 @@ def initialize_environment():
         log("❌ Nova Act SDK is not installed.")
         log("Please install it with: pip install nova-act")
 
-    # Create the profiles directory if it doesn't exist
-    os.makedirs(os.path.join(PROFILES_DIR, DEFAULT_PROFILE), exist_ok=True)
+    # No longer creating ./profiles here
+    # os.makedirs(os.path.join(PROFILES_DIR, DEFAULT_PROFILE), exist_ok=True)
 
 
 # Fix for issue with string formatting in results
@@ -598,6 +615,7 @@ async def browser_session(
     username: Optional[str] = None,
     password: Optional[str] = None,
     schema: Optional[dict] = None,
+    identity: str = DEFAULT_PROFILE_IDENTITY, # Added identity parameter
 ) -> Dict[str, Any]:
     """
     Control a web browser session via Nova Act agent.
@@ -619,6 +637,7 @@ async def browser_session(
         username: Username for direct input (use cautiously, see Nova Act docs).
         password: Password for direct input (use cautiously, see Nova Act docs).
         schema: Optional JSON schema for data extraction with 'execute'.
+        identity: A string to group related sessions (e.g., 'user123'). Used for profile directory naming. Defaults to 'default'.
 
     Returns:
         A dictionary representing the JSON-RPC result or error.
@@ -660,7 +679,7 @@ async def browser_session(
 
         # Generate a new session ID
         session_id = generate_session_id()
-        log(f"Starting new browser session with session ID: {session_id}")
+        log(f"Starting new browser session with session ID: {session_id} for identity: {identity}")
 
         # Create a progress context
         progress_context = {
@@ -671,11 +690,16 @@ async def browser_session(
             "last_update": time.time(),
         }
 
-        # Register this session in the global registry
+        # Determine the unique profile directory for this specific session
+        session_profile_dir = _profile_root() / identity / session_id # Use session_id for uniqueness
+        log(f"[{session_id}] Calculated profile directory: {session_profile_dir}")
+
+        # Register this session in the global registry, including the profile path
         with session_lock:
             active_sessions[session_id] = {
                 "session_id": session_id,
-                "identity": DEFAULT_PROFILE,
+                "identity": identity, # Store the identity used
+                "profile_dir": str(session_profile_dir), # Store the profile path
                 "status": "initializing",
                 "progress": progress_context,
                 "url": url,
@@ -696,18 +720,19 @@ async def browser_session(
         def start_browser_session():
             nova_instance = None
             try:
-                profile_dir = os.path.join(PROFILES_DIR, DEFAULT_PROFILE)
-                os.makedirs(profile_dir, exist_ok=True)
+                # Create the unique profile directory for this session
+                log(f"[{session_id}] Creating profile directory: {session_profile_dir}")
+                session_profile_dir.mkdir(parents=True, exist_ok=True) # Use Path object's mkdir
+                log(f"[{session_id}] Profile directory created successfully.")
 
                 log(f"[{session_id}] Opening browser to {url}")
 
-                # Create NovaAct instance with proper parameters for your installed version
+                # Create NovaAct instance using the unique session profile dir
                 nova_instance = NovaAct(
                     starting_page=url,
                     nova_act_api_key=api_key,
-                    user_data_dir=profile_dir,
+                    user_data_dir=str(session_profile_dir), # Pass the unique dir
                     headless=headless,
-                    # Removed unsupported parameters: capture_logs and capture_screenshots
                 )
 
                 # --- Explicitly start the client - THIS FIXES THE ERROR ---
@@ -820,6 +845,14 @@ async def browser_session(
                         log(
                             f"[{session_id}] Error during cleanup after failed start: {cleanup_e}"
                         )
+
+                # Attempt to clean up profile dir if creation failed mid-way or start failed
+                if session_profile_dir.exists():
+                    try:
+                        log(f"[{session_id}] Cleaning up profile directory after error: {session_profile_dir}")
+                        shutil.rmtree(session_profile_dir)
+                    except Exception as cleanup_e:
+                        log(f"[{session_id}] Error cleaning up profile directory after failed start: {cleanup_e}")
 
                 # Update session registry with error
                 with session_lock:
@@ -1345,6 +1378,7 @@ async def browser_session(
 
         # Define a synchronous function to end the session
         def end_browser_session():
+            session_profile_dir_to_remove = None # Store path before removing from registry
             try:
                 # Get the session data and NovaAct instance
                 with session_lock:
@@ -1353,6 +1387,7 @@ async def browser_session(
                         raise Exception(f"No active session found to end: {session_id}")
                     nova_instance = session_data.get("nova_instance")
                     executor = session_data.get("executor")
+                    session_profile_dir_to_remove = session_data.get("profile_dir") # Get path for cleanup
 
                 log(f"[{session_id}] Ending session...")
                 if nova_instance:
@@ -1398,6 +1433,22 @@ async def browser_session(
                         active_sessions[session_id][
                             "executor"
                         ] = None  # Clear the executor
+
+                # Clean up the profile directory AFTER closing browser/executor
+                if session_profile_dir_to_remove:
+                    profile_path = Path(session_profile_dir_to_remove)
+                    if profile_path.exists() and profile_path.is_dir():
+                        log(f"[{session_id}] Cleaning up profile directory: {profile_path}")
+                        try:
+                            shutil.rmtree(profile_path)
+                            log(f"[{session_id}] Profile directory removed successfully.")
+                        except Exception as cleanup_e:
+                            log(f"[{session_id}] Error removing profile directory {profile_path}: {cleanup_e}")
+                    else:
+                        log(f"[{session_id}] Profile directory not found or not a directory, skipping cleanup: {session_profile_dir_to_remove}")
+                else:
+                    log(f"[{session_id}] No profile directory path found in session data, skipping cleanup.")
+
 
                 return {"session_id": session_id, "status": "ended", "success": True}
             except Exception as e:
