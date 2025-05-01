@@ -605,7 +605,7 @@ wheels = [
 ]
 
 [[package]]
-name = "nova-act-mcp"
+name = "nova-act-mcp-server"
 version = "0.2.1"
 source = { editable = "." }
 dependencies = [
