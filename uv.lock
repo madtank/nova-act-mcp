@@ -606,7 +606,7 @@ wheels = [
 
 [[package]]
 name = "nova-act-mcp-server"
-version = "0.2.1"
+version = "0.2.4"
 source = { editable = "." }
 dependencies = [
     { name = "asyncio-extras" },
