@@ -1,6 +1,6 @@
 [project]
 name = "nova-act-mcp-server"
-version = "0.2.1"
+version = "0.2.2"
 description = "An MCP server providing tools to control web browsers using the Amazon Nova Act SDK"
 authors = [
     {name = "Jacob Taunton", email = "jandrewt82@gmail.com"}
@@ -25,6 +25,9 @@ dependencies = [
 [project.urls]
 "Homepage" = "https://github.com/madtank/nova-act-mcp"
 "Bug Tracker" = "https://github.com/madtank/nova-act-mcp/issues"
+
+[project.scripts]
+nova-act-mcp-server = "nova_mcp:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]
