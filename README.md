@@ -6,11 +6,6 @@
 
 ## Quick start (uvx)
 
-```bash
-# Run the server in an isolated environment – no cloning or virtual‑env needed
-uvx nova-act-mcp-server@latest --version
-```
-
 Add it to your MCP client configuration:
 
 ```jsonc
