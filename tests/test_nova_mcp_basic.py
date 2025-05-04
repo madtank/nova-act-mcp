@@ -149,6 +149,7 @@ if "NOVA_ACT_API_KEY" not in os.environ:
 
 TEST_URL = "https://example.com"
 
+@pytest.mark.mock
 @pytest.mark.asyncio
 async def test_start_and_end_session():
     """Test starting and ending a session"""
@@ -172,6 +173,7 @@ async def test_start_and_end_session():
     assert "result" in end_rsp, "End response should have a result field"
     assert end_rsp["result"]["status"] == "ended"
 
+@pytest.mark.mock
 @pytest.mark.asyncio
 async def test_view_html_log_roundtrip():
     """Test the full flow of start->execute->view log->end"""

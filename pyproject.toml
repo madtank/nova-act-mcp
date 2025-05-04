@@ -1,6 +1,6 @@
 [project]
 name = "nova-act-mcp-server"
-version = "0.2.4" # Reverted version for README updates
+version = "0.2.5"  # Bumped version for log handling improvements
 description = "An MCP server providing tools to control web browsers using the Amazon Nova Act SDK"
 authors = [
     {name = "Jacob Taunton", email = "jandrewt82@gmail.com"}
@@ -66,3 +66,10 @@ filterwarnings = [
     "ignore::pytest.PytestUnhandledThreadExceptionWarning"
 ]
 asyncio_mode = "strict"  # Set the asyncio mode for pytest-asyncio
+markers = [
+    "unit: fast pure-python tests (no nova-act)",
+    "mock: uses mocked nova-act/FastMCP",
+    "smoke: requires nova-act + Playwright headless, <30s",
+    "e2e: long-running full-browser tests",
+    "skip_integration_tests: env-controlled skip"
+]

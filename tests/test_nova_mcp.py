@@ -66,7 +66,8 @@ def setup_module(module):
     mock_mcp_instance_for_unit_test.tools = [
         MockTool('list_browser_sessions'),
         MockTool('control_browser'),
-        MockTool('view_html_log')
+        MockTool('view_html_log'),
+        MockTool('compress_logs')  # Add the new compression tool
     ]
     
     # Replace nova_mcp's mcp instance with our mock
@@ -97,7 +98,7 @@ def test_tool_registration():
     print(f"\nMock Registered tools: {tool_names}")
     
     # Check that all tools are registered
-    expected_tools = ['list_browser_sessions', 'control_browser', 'view_html_log']
+    expected_tools = ['list_browser_sessions', 'control_browser', 'view_html_log', 'compress_logs']
     for tool_name in expected_tools:
         assert tool_name in tool_names, f"{tool_name} tool not registered"
     

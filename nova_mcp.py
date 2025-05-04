@@ -2,18 +2,23 @@ import asyncio
 import atexit
 import base64
 import concurrent.futures
+import gzip  # Added for log compression
+import html  # Added for HTML parsing in extract_agent_thinking
 import json
+import logging
+import mimetypes
 import os
 import re
+import shutil  # Added for directory removal
 import sys
 import tempfile
 import threading
 import time
 import traceback
+import uuid  # Added for unique session dirs
 from pathlib import Path
-from typing import Any, Dict, Optional, Literal, List
-import shutil # Added for directory removal
-import uuid # Added for unique session dirs
+from typing import Any, Dict, Optional, Literal, List, Tuple, Union
+import importlib.metadata  # For version info in main()
 
 # Third-party imports
 from pydantic import BaseModel
@@ -28,6 +33,7 @@ mcp = FastMCP("nova-browser")
 DEFAULT_TIMEOUT = 180  # 3 minutes per step
 PROGRESS_INTERVAL = 5  # Send progress updates every 5 seconds
 MAX_RETRY_ATTEMPTS = 2  # Maximum retry attempts for failed steps
+SCREENSHOT_QUALITY = 45  # JPEG quality for screenshots (lower = smaller file size)
 
 # User profiles directory - Now determined dynamically
 # PROFILES_DIR = "./profiles" # Removed
@@ -70,6 +76,30 @@ except ImportError:
         pass
 
     pass
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='[NOVA_LOG] %(message)s',
+    stream=sys.stderr  # Changed from stdout to stderr
+)
+logger = logging.getLogger("nova_mcp")
+
+# Add a verbose flag that can be set through environment variable
+VERBOSE_LOGGING = os.environ.get("NOVA_MCP_VERBOSE_LOGGING", "false").lower() == "true"
+
+def log_info(message: str):
+    """Log info message with consistent format"""
+    logger.info(message)
+
+def log_debug(message: str):
+    """Log debug message only if verbose logging is enabled"""
+    if VERBOSE_LOGGING:
+        logger.info(f"DEBUG: {message}")
+
+def log_error(message: str):
+    """Log error message with consistent format"""
+    logger.error(message)
 
 
 # Utility function to log to stderr instead of stdout
@@ -179,7 +209,7 @@ def get_nova_act_api_key():
     try:
         # Check for an environment variable first (highest priority)
         api_key = os.environ.get("NOVA_ACT_API_KEY")
-        if api_key:
+        if (api_key):
             NOVA_ACT_API_KEY = api_key
             log(f"✅ Found API key in environment variable NOVA_ACT_API_KEY")
             return NOVA_ACT_API_KEY
@@ -470,7 +500,8 @@ async def list_browser_sessions() -> Dict[str, Any]:
     description=(
         "Render a Nova-Act HTML log file as inline HTML. "
         "Provide either 'html_path' (absolute) or a 'session_id' "
-        "whose last action produced a log."
+        "whose last action produced a log. "
+        "Returns { content:[{type:\"html\", html:\"…\"}], truncated:bool } — consume the html field directly."
     ),
 )
 async def view_html_log(
@@ -536,6 +567,7 @@ async def view_html_log(
                 "data": None,
             }
         }
+
     # Path existence is checked above, no need for redundant check here
 
     # Read & (optionally) truncate
@@ -582,6 +614,8 @@ async def view_html_log(
 
         Returns session details including current URL/title and execution log path. 
         HTTP logs are available as hyperlinks in the response when containing notable information.
+
+        After any execute, the last HTML log can be fetched with view_html_log { "session_id": ... } - no file paths needed.
 
         Form Element Tips:
         - Dropdowns: Use "select [option name] from dropdown" or "choose [option name] from the dropdown menu"
@@ -735,6 +769,13 @@ async def browser_session(
                     headless=headless,
                 )
 
+                # Normalize the logs directory attribute names
+                logs_dir_value = _normalize_logs_dir(nova_instance)
+                if logs_dir_value:
+                    with session_lock:
+                        active_sessions[session_id]["logs_dir"] = logs_dir_value
+                        log(f"[{session_id}] Captured logs directory: {logs_dir_value}")
+
                 # --- Explicitly start the client - THIS FIXES THE ERROR ---
                 log(f"[{session_id}] Calling nova_instance.start()...")
                 if hasattr(nova_instance, "start") and callable(nova_instance.start):
@@ -770,8 +811,19 @@ async def browser_session(
                 # Take a screenshot
                 screenshot_data = None
                 try:
-                    screenshot_bytes = nova_instance.page.screenshot()
-                    screenshot_data = base64.b64encode(screenshot_bytes).decode("utf-8")
+                    screenshot_bytes = nova_instance.page.screenshot(type="jpeg", quality=SCREENSHOT_QUALITY)
+                    # Use our helper function to get logs_dir consistently
+                    logs_dir_attr = _normalize_logs_dir(nova_instance)
+                    
+                    # If we found any valid logs directory attribute
+                    if logs_dir_attr:
+                        # Save screenshot to disk
+                        shot_path = Path(logs_dir_attr) / f"screenshot_{uuid.uuid4().hex}.jpg"
+                        shot_path.write_bytes(screenshot_bytes)
+                        # Still keep base64 encoding for backward compatibility
+                        screenshot_data = base64.b64encode(screenshot_bytes).decode("utf-8")
+                    else:
+                        log(f"[{session_id}] Warning: Couldn't find logs directory in nova_instance attributes")
                 except Exception as e:
                     log(f"Error taking screenshot: {str(e)}")
 
@@ -806,7 +858,9 @@ async def browser_session(
                                     nova_instance.close
                                 ):
                                     nova_instance.close()
-                                elif hasattr(nova_instance, "__exit__"):
+                                elif hasattr(nova_instance, "__exit__") and callable(
+                                    nova_instance.__exit__
+                                ):
                                     nova_instance.__exit__(None, None, None)
                             except Exception:
                                 pass  # Avoid errors during cleanup
@@ -839,7 +893,9 @@ async def browser_session(
                             nova_instance.close
                         ):
                             nova_instance.close()
-                        elif hasattr(nova_instance, "__exit__"):
+                        elif hasattr(nova_instance, "__exit__") and callable(
+                            nova_instance.__exit__
+                        ):
                             nova_instance.__exit__(None, None, None)
                     except Exception as cleanup_e:
                         log(
@@ -1098,6 +1154,21 @@ async def browser_session(
                         schema=schema,  # Pass schema if provided
                     )
 
+                    # --- Capture logs_dir after nova.act (the SDK may populate it late)
+                    try:
+                        new_logs_dir = (
+                            getattr(nova_instance, "logs_directory", None)
+                            or getattr(nova_instance, "logs_dir", None)
+                            or getattr(nova_instance, "log_dir", None)
+                        )
+                        if new_logs_dir:
+                            with session_lock:
+                                active_sessions[session_id]["logs_dir"] = new_logs_dir
+                                log(f"[{session_id}] Updated logs_dir after act(): {new_logs_dir}")
+                    except Exception as e:
+                        log(f"[{session_id}] Error capturing logs_dir after act(): {e}")
+                        pass
+
                     # Extract the response properly
                     if (
                         result
@@ -1159,26 +1230,55 @@ async def browser_session(
                     nova_act_id = result.metadata.act_id
                     log(f"[{session_id}] Found metadata: nova_session_id={nova_session_id}, nova_act_id={nova_act_id}") # ADDED LOG
 
-                    # Try to get the HTML output path from logs_directory
-                    logs_dir = (
-                        nova_instance.logs_directory
-                        if hasattr(nova_instance, "logs_directory")
-                        else None
-                    )
-                    log(f"[{session_id}] Using logs_dir: {logs_dir}") # ADDED LOG
-
-                    if logs_dir and nova_session_id and nova_act_id:
-                        possible_html_path = os.path.join(
-                            logs_dir, nova_session_id, f"act_{nova_act_id}_output.html"
+                    # Try to get the HTML output path directly from nova_instance
+                    if hasattr(nova_instance, "last_output_html_path") and nova_instance.last_output_html_path:
+                        html_output_path = os.path.abspath(nova_instance.last_output_html_path)
+                        log(f"[{session_id}] Found HTML path from nova_instance.last_output_html_path: {html_output_path}")
+                        if html_output_path not in absolute_html_output_paths:
+                            absolute_html_output_paths.append(html_output_path)
+                    
+                    # If that didn't work, try to construct the path from logs_directory
+                    if not html_output_path:
+                        # Try every known attribute for Act log directory
+                        logs_dir = (
+                            getattr(nova_instance, "logs_directory", None)
+                            or getattr(nova_instance, "logs_dir", None)
+                            or getattr(nova_instance, "log_dir", None)
                         )
-                        log(f"[{session_id}] Constructed possible_html_path: {possible_html_path}") # ADDED LOG
-                        path_exists = os.path.exists(possible_html_path) # ADDED Check
-                        log(f"[{session_id}] Does path exist? {path_exists}") # ADDED LOG
-                        if path_exists:
-                            html_output_path = os.path.abspath(possible_html_path) # Get absolute path
-                            if html_output_path not in absolute_html_output_paths:
-                                absolute_html_output_paths.append(html_output_path) # Store absolute path
-                            log(f"[{session_id}] Found and stored absolute HTML output path: {html_output_path}") # MODIFIED LOG
+                        # Cache for later tools
+                        if logs_dir:
+                            with session_lock:
+                                active_sessions[session_id]["logs_dir"] = logs_dir
+                        log(f"[{session_id}] Using logs_dir: {logs_dir}") # ADDED LOG
+
+                        if logs_dir and nova_session_id and nova_act_id:
+                            possible_html_path = os.path.join(
+                                logs_dir, nova_session_id, f"act_{nova_act_id}_output.html"
+                            )
+                            log(f"[{session_id}] Constructed possible_html_path: {possible_html_path}") # ADDED LOG
+                            path_exists = os.path.exists(possible_html_path) # ADDED Check
+                            log(f"[{session_id}] Does path exist? {path_exists}") # ADDED LOG
+                            if path_exists:
+                                html_output_path = os.path.abspath(possible_html_path) # Get absolute path
+                                if html_output_path not in absolute_html_output_paths:
+                                    absolute_html_output_paths.append(html_output_path) # Store absolute path
+                                log(f"[{session_id}] Found and stored absolute HTML output path: {html_output_path}") # MODIFIED LOG
+                            
+                            # ------------------------------------------------------------------
+                            # Capture *_calls.json for later compression
+                            har_json_path = None
+                            if logs_dir and nova_session_id and nova_act_id:
+                                candidate = Path(logs_dir) / nova_session_id / f"act_{nova_act_id}_calls.json"
+                                if candidate.exists():
+                                    har_json_path = str(candidate.resolve())
+                                    log(f"[{session_id}] Found HAR JSON path: {har_json_path}")
+
+                            # store it in the session dict
+                            with session_lock:
+                                if session_id in active_sessions:
+                                    if har_json_path:
+                                        active_sessions[session_id]["last_har_path"] = har_json_path
+                            # ------------------------------------------------------------------
 
                     # If logs_directory is not set or path not found, try temp directory
                     if not html_output_path:
@@ -1186,33 +1286,50 @@ async def browser_session(
                         temp_dir = tempfile.gettempdir()
                         log(f"[{session_id}] Temp directory: {temp_dir}")
                         
+                        # Track count of directories found for less verbose logging
+                        logs_dir_count = 0
+                        html_files_found = 0
+                        
                         # Broader search for HTML logs
                         for root, dirs, files in os.walk(temp_dir):
                             # Look for directories that contain 'nova_act_logs' in the path
-                            # Less restrictive - don't require exact session ID match
                             if 'nova_act_logs' in root:
-                                log(f"[{session_id}] Found nova_act_logs directory: {root}")
+                                # Only log directory paths if verbose logging is enabled
+                                if VERBOSE_LOGGING:
+                                    log(f"[{session_id}] Found nova_act_logs directory: {root}")
+                                else:
+                                    logs_dir_count += 1
+                                    
                                 for file in files:
                                     if file.endswith("_output.html"):
-                                        log(f"[{session_id}] Found potential output HTML: {file}")
+                                        # Only log file discovery if verbose or it's potentially the right file
+                                        if VERBOSE_LOGGING:
+                                            log(f"[{session_id}] Found potential output HTML: {file}")
                                         temp_path = os.path.join(root, file)
                                         if os.path.exists(temp_path): 
                                             abs_temp_path = os.path.abspath(temp_path)
                                             file_mtime = os.path.getmtime(temp_path)
                                             # Add creation time to sort newest files first
-                                            log(f"[{session_id}] Found HTML file: {abs_temp_path} (modified: {file_mtime})")
+                                            if VERBOSE_LOGGING:
+                                                log(f"[{session_id}] Found HTML file: {abs_temp_path} (modified: {file_mtime})")
                                             if abs_temp_path not in absolute_html_output_paths:
                                                 absolute_html_output_paths.append(abs_temp_path)
-                                                log(f"[{session_id}] Added HTML file to results list")
+                                                html_files_found += 1
+                                                if VERBOSE_LOGGING:
+                                                    log(f"[{session_id}] Added HTML file to results list")
                             # Don't search too deeply - only go one level deeper in matching directories
                             if 'nova_act_logs' not in root:
                                 # Remove directories that don't seem promising
                                 dirs[:] = [d for d in dirs if 'nova' in d.lower() or 'act' in d.lower() or 'log' in d.lower() or 'tmp' in d.lower()]
+                        
+                        # Log summary instead of verbose details when not in verbose mode
+                        if not VERBOSE_LOGGING and logs_dir_count > 0:
+                            log(f"[{session_id}] Found {logs_dir_count} nova_act_logs directories and {html_files_found} HTML files")
                             
-                        # If we found multiple paths, sort by modification time (newest first)
-                        if len(absolute_html_output_paths) > 1:
-                            absolute_html_output_paths.sort(key=lambda path: os.path.getmtime(path), reverse=True)
-                            log(f"[{session_id}] Sorted {len(absolute_html_output_paths)} HTML logs by modification time")
+                    # If we found multiple paths, sort by modification time (newest first)
+                    if len(absolute_html_output_paths) > 1:
+                        absolute_html_output_paths.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+                        log(f"[{session_id}] Sorted {len(absolute_html_output_paths)} HTML logs by modification time")
                 else:
                      log(f"[{session_id}] No result or result.metadata found. Cannot search for HTML path.") # ADDED LOG
 
@@ -1242,6 +1359,35 @@ async def browser_session(
                 # Screenshot code remains disabled
                 screenshot_data = None
 
+                # Find HAR JSON log files to store in session data
+                # This will be used for auto-compression
+                har_json_path = None
+                # --- Locate the HAR / calls JSON for compression ----
+                har_json_path = None
+
+                # 1) First, prefer a direct attribute on the NovaAct instance
+                for attr in ("last_calls_json_path", "last_har_path", "last_output_calls_json_path"):
+                    candidate = getattr(nova_instance, attr, None)
+                    if candidate and os.path.exists(candidate):
+                        har_json_path = os.path.abspath(candidate)
+                        log(f"[{session_id}] Found HAR path directly from nova_instance.{attr}: {har_json_path}")
+                        break
+
+                # 2) Fallback to constructing it from logs_dir + IDs
+                if not har_json_path and logs_dir and nova_session_id and nova_act_id:
+                    possible = os.path.join(
+                        logs_dir, nova_session_id, f"act_{nova_act_id}_calls.json"
+                    )
+                    if os.path.exists(possible):
+                        har_json_path = os.path.abspath(possible)
+                        log(f"[{session_id}] Found HAR path by constructing from logs_dir: {har_json_path}")
+
+                # 3) Save for later compression
+                if har_json_path:
+                    with session_lock:
+                        active_sessions[session_id]["last_har_path"] = har_json_path
+                        log(f"[{session_id}] Saved HAR path to session: {har_json_path}")
+                
                 # Update session registry with results - USE ABSOLUTE PATHS
                 with session_lock:
                     if session_id in active_sessions:
@@ -1249,25 +1395,42 @@ async def browser_session(
                         # Ensure results list exists
                         if "results" not in active_sessions[session_id]:
                              active_sessions[session_id]["results"] = []
-                        active_sessions[session_id]["results"].append(
-                            {
-                                "action": original_instruction,
-                                "executed": (
-                                    instruction_to_execute
-                                    if not action_handled_directly
-                                    else "direct_playwright"
-                                ),
-                                "response": response_content,
-                                "agent_messages": agent_messages,
-                                "output_html_paths": absolute_html_output_paths, # Store absolute paths list
-                                "screenshot_included": False,
-                                "direct_action": action_handled_directly,
-                                "timestamp": time.time() # Add timestamp for easier debugging
-                            }
-                        )
+                        
+                        # Store the HAR path for potential compression
+                        result_entry = {
+                            "action": original_instruction,
+                            "executed": (
+                                instruction_to_execute
+                                if not action_handled_directly
+                                else "direct_playwright"
+                            ),
+                            "response": response_content,
+                            "agent_messages": agent_messages,
+                            "output_html_paths": absolute_html_output_paths, # Store absolute paths list
+                            "screenshot_included": False,
+                            "direct_action": action_handled_directly,
+                            "timestamp": time.time(), # Add timestamp for easier debugging
+                        }
+                        
+                        # Add HAR path if found
+                        if har_json_path:
+                            result_entry["har_json_path"] = har_json_path
+                        
+                        active_sessions[session_id]["results"].append(result_entry)
                         active_sessions[session_id]["last_updated"] = time.time()
                         active_sessions[session_id]["status"] = "browser_ready"
                         active_sessions[session_id]["error"] = None
+                        
+                        # Store the last HAR path in the session for easy access
+                        if har_json_path:
+                            active_sessions[session_id]["last_har_path"] = har_json_path
+                            
+                            # --- Auto-compress the HAR and remember where it went ---
+                            comp_info = compress_log_file(har_json_path, extract_screenshots=True)
+                            if comp_info.get("success"):
+                                comp_path = comp_info.get("compressed_path")
+                                log(f"[{session_id}] HAR compressed ➜ {comp_path}")
+                                active_sessions[session_id]["last_compressed_log_path"] = comp_path
                     else:
                          log(f"[{session_id}] Session disappeared before results could be stored.")
 
@@ -1456,7 +1619,14 @@ async def browser_session(
                 error_tb = traceback.format_exc()
                 log(f"Error ending browser session: {error_message}")
                 log(f"Traceback: {error_tb}")
-                raise Exception(error_message)
+
+                error = {
+                    "code": -32603,
+                    "message": f"Error ending browser session: {error_message}",
+                    "data": {"session_id": session_id},
+                }
+
+                return {"error": error}
 
         # Get the session's executor
         with session_lock:
@@ -1494,13 +1664,594 @@ async def browser_session(
 
             return {"error": error}
 
-    else:
-        error = {
-            "code": -32601,
-            "message": f"Unknown action '{action}'. Valid actions are 'start', 'execute', 'end'.",
-            "data": None,
+
+def compress_log_file(log_path, extract_screenshots=True, compression_level=9):
+    """
+    Compress Nova Act logs by removing screenshots and applying gzip compression.
+    
+    Args:
+        log_path (str): Path to the log file to compress
+        extract_screenshots (bool): Whether to extract screenshots to separate files
+        compression_level (int): Compression level for gzip (1-9)
+        
+    Returns:
+        dict: Information about the compression including paths and size reduction
+    """
+    if not os.path.exists(log_path):
+        log(f"Log file not found: {log_path}")
+        return {"success": False, "error": "Log file not found", "compressed_path": None}
+    
+    try:
+        # Get the original file size
+        original_size = os.path.getsize(log_path)
+        
+        # Parse JSON file
+        with open(log_path, 'r', encoding='utf-8') as f:
+            try:
+                data = json.load(f)
+            except json.JSONDecodeError:
+                log(f"Invalid JSON in log file: {log_path}")
+                return {"success": False, "error": "Invalid JSON in log file"}
+        
+        # Create screenshot directory if extracting screenshots
+        screenshot_dir = None
+        screenshots = []  # Store extracted screenshots for preview
+        screenshot_paths = []  # Store paths to the extracted screenshots
+        
+        if extract_screenshots:
+            screenshot_dir = os.path.join(os.path.dirname(log_path), "screenshots")
+            os.makedirs(screenshot_dir, exist_ok=True)
+            
+            # Extract screenshots to separate files
+            for i, entry in enumerate(data):
+                if entry.get("request") and entry["request"].get("screenshot"):
+                    screenshot_data = entry["request"]["screenshot"]
+                    screenshots.append(screenshot_data)  # Store for preview
+                    screenshot_path = os.path.join(screenshot_dir, f"screenshot_{uuid.uuid4().hex}.jpg")
+                    screenshot_paths.append(screenshot_path)  # Store path for later use
+                    try:
+                        # Save the screenshot
+                        with open(screenshot_path, 'wb') as f:
+                            # If it's a data URL, extract the base64 data
+                            if screenshot_data.startswith('data:image'):
+                                base64_data = screenshot_data.split(',', 1)[1]
+                                f.write(base64.b64decode(base64_data))
+                            else:
+                                # Assume it's already base64
+                                try:
+                                    f.write(base64.b64decode(screenshot_data))
+                                except:
+                                    # If decoding fails, write as text
+                                    f.write(screenshot_data.encode('utf-8'))
+                        # Record the screenshot path in the data
+                        entry["request"]["screenshot_path"] = screenshot_path
+                    except Exception as e:
+                        log(f"Error saving screenshot {i}: {str(e)}")
+        
+        # Remove screenshots from the data
+        screenshot_size_total = 0
+        screenshot_count = 0
+        for entry in data:
+            # Strip any legacy "screenshot":"data:image/..." keys
+            if entry.get("request"):
+                # Remove the screenshot data but keep the path if we extracted it
+                if entry["request"].get("screenshot"):
+                    screenshot_size_total += len(entry["request"]["screenshot"])
+                    screenshot_count += 1
+                    entry["request"].pop("screenshot", None)
+        
+        # Create the compressed JSON file path
+        compressed_json_path = log_path.replace('.json', '_compressed.json')
+        if compressed_json_path == log_path:
+            compressed_json_path = log_path + '.compressed'
+            
+        # Save the JSON without screenshots
+        with open(compressed_json_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f)
+            
+        # Get the size of the JSON without screenshots
+        no_screenshots_size = os.path.getsize(compressed_json_path)
+        
+        # Compress the JSON file with gzip
+        gzip_path = compressed_json_path + '.gz'
+        with open(compressed_json_path, 'rb') as f_in:
+            with gzip.open(gzip_path, 'wb', compresslevel=compression_level) as f_out:
+                shutil.copyfileobj(f_in, f_out)
+        
+        # Get the raw compressed data for preview
+        with open(gzip_path, 'rb') as f:
+            compressed_data = f.read()
+                
+        # Get the compressed file size
+        compressed_size = os.path.getsize(gzip_path)
+        
+        # Calculate size reductions
+        size_reduction_no_screenshots = round((original_size - no_screenshots_size) / original_size * 100, 2)
+        size_reduction_compressed = round((original_size - compressed_size) / original_size * 100, 2)
+        
+        # Create screenshot preview from the first screenshot if available
+        first_screenshot_preview = None
+        if screenshot_count > 0 and extract_screenshots and screenshot_paths:
+            try:
+                screenshot_file_path = screenshot_paths[0]  # Use the first screenshot we saved
+                if os.path.exists(screenshot_file_path):
+                    with open(screenshot_file_path, 'rb') as f:
+                        screenshot_bytes = f.read()[:50]  # Just read first 50 bytes
+                        first_screenshot_preview = f"data:image/jpeg;base64,{base64.b64encode(screenshot_bytes).decode()}"
+            except Exception as e:
+                log(f"Error creating screenshot preview: {str(e)}")
+        
+        # Return compression statistics
+        result = {
+            "success": True,
+            "original_path": log_path,
+            "original_size": original_size,
+            "compressed_path": gzip_path,
+            "compressed_size": compressed_size,
+            "no_screenshots_path": compressed_json_path,
+            "no_screenshots_size": no_screenshots_size,
+            "screenshot_count": screenshot_count,
+            "screenshot_size_total": screenshot_size_total,
+            "screenshot_directory": screenshot_dir if extract_screenshots else None,
+            "size_reduction_no_screenshots": f"{size_reduction_no_screenshots}%",
+            "size_reduction_compressed": f"{size_reduction_compressed}%",
+            # Add preview data
+            "preview": {
+                "first_50_bytes": compressed_data[:50].hex(),  # quick check it's valid gzip
+                "first_50_b64_of_screenshot": first_screenshot_preview
+            }
         }
-        return {"error": error}
+        
+        log(f"Log compression complete: {result['size_reduction_compressed']}% reduction")
+        return result
+    
+    except Exception as e:
+        log(f"Error compressing log file: {str(e)}")
+        return {"success": False, "error": str(e), "compressed_path": None}
+
+
+@mcp.tool(
+    name="compress_logs",
+    description=(
+        "Compress a Nova-Act HAR/JSON log file. "
+        "Provide either 'log_path' or a 'session_id' whose last action "
+        "produced a HAR. Returns compression stats and a screenshot preview. "
+        "If log_path is omitted but session_id is supplied, the tool automatically locates the newest *_calls.json for that session. "
+        "⚠ compressed_path is local to the MCP server. Agents should not attempt to open it. To display the log use view_html_log."
+    ),
+)
+async def compress_logs_tool(
+    log_path: Optional[str] = None,
+    session_id: Optional[str] = None,
+    extract_screenshots: bool = True,
+    compression_level: int = 9,
+) -> Dict[str, Any]:
+    """
+    Compress Nova Act logs by removing screenshots and applying gzip compression.
+    
+    Args:
+        log_path: Path to the log file to compress, optional if session_id is provided
+        session_id: Session ID to find the most recent HAR log, optional if log_path is provided
+        extract_screenshots: Whether to extract screenshots to separate files
+        compression_level: Compression level for gzip (1-9)
+        
+    Returns:
+        dict: Information about the compression including paths and size reduction
+    """
+    initialize_environment()
+    
+    # If the log has already been compressed in this session, use it
+    if not log_path and session_id:
+        with session_lock:
+            sess = active_sessions.get(session_id, {})
+            log_path = sess.get("last_har_path")
+            
+            # Get the Nova Act session ID if available, may be different from MCP session ID
+            nova_session_id = sess.get("nova_session_id")
+            
+            # Fall‑back: scan the session's logs_dir for the newest *_calls.json
+            if not log_path:
+                logs_dir = sess.get("logs_dir")
+                if logs_dir and os.path.isdir(logs_dir):
+                    try:
+                        # First, try the Nova Act session ID directory if available
+                        if nova_session_id and os.path.isdir(os.path.join(logs_dir, nova_session_id)):
+                            nova_dir = os.path.join(logs_dir, nova_session_id)
+                            log(f"[{session_id}] Checking Nova session directory: {nova_dir}")
+                            # Find all *_calls.json files in that directory
+                            calls_files = list(Path(nova_dir).glob("*_calls.json"))
+                            if calls_files:
+                                # Get the newest one
+                                newest_file = max(calls_files, key=lambda p: p.stat().st_mtime)
+                                log_path = str(newest_file.resolve())
+                                log(f"[{session_id}] Found newest calls.json in Nova session dir: {log_path}")
+                            
+                        # If still not found, search recursively
+                        if not log_path:
+                            log(f"[{session_id}] Scanning logs_dir recursively for *_calls.json: {logs_dir}")
+                            all_json_files = list(Path(logs_dir).rglob("*_calls.json"))
+                            if all_json_files:
+                                # Get the newest one
+                                newest_file = max(all_json_files, key=lambda p: p.stat().st_mtime)
+                                log_path = str(newest_file.resolve())
+                                log(f"[{session_id}] Found newest calls.json by recursive scan: {log_path}")
+                    except Exception as e:
+                        log(f"[{session_id}] Error scanning for calls.json: {e}")
+                        
+                # If still not found, try scanning the temp directory for nova_act_logs
+                if not log_path:
+                    try:
+                        log(f"[{session_id}] No HAR found in logs_dir, scanning temp directory")
+                        temp_dir = tempfile.gettempdir()
+                        # Get all *_nova_act_logs directories
+                        nova_dirs = [
+                            d for d in Path(temp_dir).glob("*nova_act_logs*") 
+                            if d.is_dir()
+                        ]
+                        log(f"[{session_id}] Found {len(nova_dirs)} nova_act_logs directories")
+                        
+                        # Find all *_calls.json files in these directories (non-recursively for speed)
+                        all_json_files = []
+                        for nova_dir in nova_dirs:
+                            all_json_files.extend(list(nova_dir.rglob("*_calls.json")))
+                            
+                        log(f"[{session_id}] Found {len(all_json_files)} calls.json files")
+                        
+                        if all_json_files:
+                            # Sort by modification time (newest first)
+                            sorted_files = sorted(
+                                all_json_files, 
+                                key=lambda p: p.stat().st_mtime, 
+                                reverse=True
+                            )
+                            # Use the newest one
+                            log_path = str(sorted_files[0].resolve())
+                            log(f"[{session_id}] Using most recently modified calls.json: {log_path}")
+                    except Exception as e:
+                        log(f"[{session_id}] Error scanning temp directory: {e}")
+            
+            # Maybe we already compressed it once
+            if not log_path:
+                compressed_path = sess.get("last_compressed_log_path")
+                if compressed_path and os.path.exists(compressed_path):
+                    log(f"[{session_id}] Found already compressed log: {compressed_path}")
+                    result = {
+                        "success": True,
+                        "compressed_path": compressed_path,
+                        "reused_existing": True,
+                        "preview": {
+                            "first_50_bytes": "reused_existing",
+                            "first_50_b64_of_screenshot": "reused_existing"
+                        }
+                    }
+                    return {
+                        "content": [{"type": "text", "text": f"Using previously compressed log: {compressed_path}"}],
+                        "compression_stats": result, # Return nested properly
+                        "success": True
+                    }
+    
+    # Ensure the log path exists
+    if not log_path or not os.path.exists(log_path):
+        return {
+            "error": {
+                "code": -32602,
+                "message": f"Log file not found: {log_path}",
+                "data": {"log_path": log_path, "session_id": session_id},
+            }
+        }
+    
+    try:
+        # Use the compression function
+        compression_result = compress_log_file(
+            log_path, 
+            extract_screenshots=extract_screenshots, 
+            compression_level=compression_level
+        )
+        
+        if not compression_result.get("success", False):
+            return {
+                "error": {
+                    "code": -32603,
+                    "message": compression_result.get("error", "Unknown compression error"),
+                    "data": None,
+                }
+            }
+        
+        # Store the compressed path in the session data if session_id is provided
+        if session_id:
+            with session_lock:
+                if session_id in active_sessions:
+                    active_sessions[session_id]["last_compressed_log_path"] = compression_result.get("compressed_path")
+        
+        # Format the compression stats for reporting
+        result_text = (
+            f"Log compression complete for: {log_path}\n\n"
+            f"Original size: {compression_result['original_size']} bytes\n"
+            f"Size without screenshots: {compression_result['no_screenshots_size']} bytes "
+            f"({compression_result['size_reduction_no_screenshots']} reduction)\n"
+            f"Compressed size: {compression_result['compressed_size']} bytes "
+            f"({compression_result['size_reduction_compressed']} reduction)\n\n"
+            f"Screenshots extracted: {compression_result['screenshot_count']}\n"
+            f"Screenshot directory: {compression_result['screenshot_directory'] or 'None'}\n\n"
+            f"Compressed file: {compression_result['compressed_path']}"
+        )
+        
+        # Preview data should already be in compression_result from compress_log_file
+        
+        # Return the compression result directly in the compression_stats key
+        return {
+            "content": [{"type": "text", "text": result_text}],
+            "compression_stats": compression_result, # This is what the test expects
+            "success": True
+        }
+    
+    except Exception as e:
+        error_message = str(e)
+        error_tb = traceback.format_exc()
+        log(f"Error compressing logs: {error_message}")
+        log(f"Traceback: {error_tb}")
+        
+        return {
+            "error": {
+                "code": -32603,
+                "message": f"Error compressing logs: {error_message}",
+                "data": {"traceback": error_tb},
+            }
+        }
+
+
+@mcp.tool(
+    name="view_compressed_log",
+    description=(
+        "Render a compressed Nova-Act log file as inline HTML or text. "
+        "Provide either 'compressed_path' (absolute) or a 'session_id' "
+        "whose logs were compressed. Large files are truncated for safety."
+    ),
+)
+async def view_compressed_log(
+    compressed_path: Optional[str] = None,
+    session_id: Optional[str] = None,
+    truncate_to_kb: int = 512,
+) -> Dict[str, Any]:
+    """
+    Stream a compressed log file (gzip) back to the caller so Claude (or other MCP UIs)
+    can embed it directly. If both args are given, compressed_path wins.
+    Large files are truncated to keep JSON-RPC payloads reasonable.
+    
+    Args:
+        compressed_path: Absolute path to the compressed log file (.gz)
+        session_id: Session ID to find the most recent compressed log
+        truncate_to_kb: Size limit in KB before truncation is applied
+        
+    Returns:
+        Dictionary containing the uncompressed content suitable for embedding in UI
+    """
+    initialize_environment()
+    
+    # Resolve path from session registry if only session_id given
+    found_path = None
+    if not compressed_path and session_id:
+        with session_lock:
+            sess = active_sessions.get(session_id, {})
+            # Try to get the last compressed log path
+            found_path = sess.get("last_compressed_log_path")
+            if found_path:
+                log(f"[{session_id}] Found compressed log path in session: {found_path}")
+            else:
+                # If not found, see if we can compress one now
+                har_path = sess.get("last_har_path")
+                if har_path and os.path.exists(har_path):
+                    try:
+                        log(f"[{session_id}] Compressing HAR on-demand: {har_path}")
+                        comp_result = compress_log_file(har_path, extract_screenshots=True)
+                        if comp_result.get("success") and comp_result.get("compressed_path"):
+                            found_path = comp_result["compressed_path"]
+                            # Store for future reference
+                            active_sessions[session_id]["last_compressed_log_path"] = found_path
+                            log(f"[{session_id}] Created and stored compressed path: {found_path}")
+                    except Exception as e:
+                        log(f"[{session_id}] Error compressing on-demand: {e}")
+                        
+        compressed_path = found_path
+    
+    # Check if the path exists and has the expected extension
+    if not compressed_path or not os.path.exists(compressed_path):
+        error_detail = f"session_id: {session_id}" if session_id else "no identifier provided"
+        log(f"Could not find a compressed log for {error_detail}")
+        return {
+            "error": {
+                "code": -32602,
+                "message": f"Compressed log file not found for {error_detail}",
+                "data": {"compressed_path": compressed_path, "session_id": session_id},
+            }
+        }
+    
+    # Ensure it's a gzip file
+    is_gzip = compressed_path.endswith('.gz')
+    
+    try:
+        # Open and read the compressed file
+        if (is_gzip):
+            with gzip.open(compressed_path, 'rb') as f:
+                decompressed_data = f.read()
+        else:
+            with open(compressed_path, 'rb') as f:
+                decompressed_data = f.read()
+        
+        # Check if it's JSON and handle accordingly
+        try:
+            # Try to parse as JSON
+            if isinstance(decompressed_data, bytes):
+                json_data = json.loads(decompressed_data.decode('utf-8', 'ignore'))
+            else:
+                json_data = json.loads(decompressed_data)
+                
+            # Format JSON nicely
+            formatted_json = json.dumps(json_data, indent=2)
+            
+            # Truncate if needed
+            truncated = False
+            if len(formatted_json) > truncate_to_kb * 1024:
+                formatted_json = formatted_json[:truncate_to_kb * 1024] + "\n... (truncated)"
+                truncated = True
+                
+            # Return as formatted code
+            return {
+                "content": [{"type": "code", "language": "json", "code": formatted_json}],
+                "source_path": compressed_path,
+                "truncated": truncated,
+                "format": "json"
+            }
+            
+        except json.JSONDecodeError:
+            # Not JSON, handle as HTML or text
+            if isinstance(decompressed_data, bytes):
+                content = decompressed_data.decode('utf-8', 'ignore')
+            else:
+                content = decompressed_data
+                
+            # Check if it looks like HTML
+            is_html = content.strip().startswith('<!DOCTYPE html>') or content.strip().startswith('<html')
+            
+            # Truncate if needed
+            truncated = False
+            if len(content) > truncate_to_kb * 1024:
+                if is_html:
+                    content = content[:truncate_to_kb * 1024] + "\n<!-- ...truncated... -->"
+                else:
+                    content = content[:truncate_to_kb * 1024] + "\n... (truncated)"
+                truncated = True
+            
+            # Return as appropriate content type
+            if is_html:
+                return {
+                    "content": [{"type": "html", "html": content}],
+                    "source_path": compressed_path,
+                    "truncated": truncated,
+                    "format": "html"
+                }
+            else:
+                return {
+                    "content": [{"type": "text", "text": content}],
+                    "source_path": compressed_path,
+                    "truncated": truncated,
+                    "format": "text"
+                }
+    
+    except Exception as e:
+        error_message = str(e)
+        error_tb = traceback.format_exc()
+        log(f"Error processing compressed log file {compressed_path}: {error_message}")
+        log(f"Traceback: {error_tb}")
+        
+        return {
+            "error": {
+                "code": -32603,
+                "message": f"Error processing compressed log: {error_message}",
+                "data": {"path": compressed_path, "error": error_message},
+            }
+        }
+
+
+@mcp.tool(
+    name="fetch_file",
+    description="Return a local file (≤2 MB) as base64 so the caller can download it."
+)
+async def fetch_file(path: str) -> Dict[str, Any]:
+    """
+    Return a small binary file (≤2 MB) as base64 so the caller can download it.
+    This is useful for downloading compressed logs or screenshots for offline analysis.
+    
+    Args:
+        path: Absolute path to the file to fetch
+        
+    Returns:
+        Dictionary containing the file as base64, along with filename and MIME type
+    """
+    from pathlib import Path, PurePosixPath
+    
+    initialize_environment()
+    
+    try:
+        p = Path(path).expanduser().resolve()
+        if not p.is_file():
+            return {
+                "error": {
+                    "code": -32602,
+                    "message": f"File not found: {path}",
+                    "data": {"path": path}
+                }
+            }
+            
+        file_size = p.stat().st_size
+        if file_size > 2 * 1024 * 1024:  # 2 MB limit
+            return {
+                "error": {
+                    "code": -32602,
+                    "message": f"File too large: {file_size} bytes (limit is 2 MB)",
+                    "data": {"path": path, "size": file_size}
+                }
+            }
+            
+        import base64, mimetypes
+        
+        # Read the file as binary data
+        b64 = base64.b64encode(p.read_bytes()).decode()
+        
+        # Guess MIME type from file extension
+        mime = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+        
+        # Return file info and base64-encoded content
+        return {
+            "filename": p.name,
+            "mime": mime,
+            "size": file_size,
+            "base64": b64
+        }
+        
+    except Exception as e:
+        error_message = str(e)
+        error_tb = traceback.format_exc()
+        log(f"Error fetching file {path}: {error_message}")
+        log(f"Traceback: {error_tb}")
+        
+        return {
+            "error": {
+                "code": -32603,
+                "message": f"Error fetching file: {error_message}",
+                "data": {"path": path, "error": error_message}
+            }
+        }
+
+
+# Helper function to normalize logs directory across NovaAct versions
+def _normalize_logs_dir(nova_instance):
+    """
+    Normalize the logs directory attribute across different versions of NovaAct.
+    NovaAct <=0.8 used .logs_directory and .logs_dir
+    NovaAct 0.9+ switched to .log_directory
+    This function ensures all versions are supported.
+    
+    Args:
+        nova_instance: NovaAct instance to check for logs directory
+        
+    Returns:
+        str: The normalized logs directory path or None if not found
+    """
+    if not nova_instance:
+        return None
+        
+    # Try all known attribute names for log directory
+    logs_dir = None
+    
+    # Try each attribute name in order of preference
+    for attr_name in ["logs_directory", "logs_dir", "log_directory", "log_dir"]:
+        if hasattr(nova_instance, attr_name):
+            logs_dir = getattr(nova_instance, attr_name)
+            if logs_dir:  # If attribute exists and has a value
+                break
+                
+    return logs_dir
 
 
 def main():
