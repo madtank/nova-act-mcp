@@ -117,7 +117,7 @@ async def test_nova_act_workflow():
     # 2. Start a new session
     print("\nTesting: control_browser (start)")
     start_params = {"action": "start", "url": "https://example.com", "headless": True}
-    start_result_dict = _as_dict(await browser_session(**start_params))
+    start_result_dict = _as_dict(await nova_mcp.browser_session(**start_params))
     assert "session_id" in start_result_dict, f"'session_id' missing in start result: {start_result_dict}"
     assert start_result_dict.get("status") == "ready", f"Unexpected status in start result: {start_result_dict}"
     assert start_result_dict.get("success") is True, f"Start action did not report success: {start_result_dict}"
@@ -134,7 +134,7 @@ async def test_nova_act_workflow():
         "session_id": session_id,
         "instruction": "Click the link 'More information...'",
     }
-    execute_result_dict = _as_dict(await browser_session(**execute_params))
+    execute_result_dict = _as_dict(await nova_mcp.browser_session(**execute_params))
     assert execute_result_dict.get("session_id") == session_id, f"Session ID mismatch in execute result: {execute_result_dict}"
     assert execute_result_dict.get("success") is True, f"Execute action did not report success: {execute_result_dict}"
     assert "content" in execute_result_dict, f"'content' missing in execute result: {execute_result_dict}"
@@ -169,7 +169,7 @@ async def test_nova_act_workflow():
     # 5. End the session
     print("\nTesting: control_browser (end)")
     end_params = {"action": "end", "session_id": session_id}
-    end_result_dict = _as_dict(await browser_session(**end_params))
+    end_result_dict = _as_dict(await nova_mcp.browser_session(**end_params))
     assert end_result_dict.get("session_id") == session_id, f"Session ID mismatch in end result: {end_result_dict}"
     assert end_result_dict.get("status") == "ended", f"End action did not report ended status: {end_result_dict}"
     assert end_result_dict.get("success") is True, f"End action did not report success: {end_result_dict}"
@@ -208,7 +208,7 @@ async def test_nova_act_workflow_with_log_compression():
     # 1. Start a new session
     print("\nTesting: control_browser (start)")
     start_params = {"action": "start", "url": "https://example.com", "headless": True}
-    start_result_dict = _as_dict(await browser_session(**start_params))
+    start_result_dict = _as_dict(await nova_mcp.browser_session(**start_params))
     assert "session_id" in start_result_dict, f"'session_id' missing in start result: {start_result_dict}"
     session_id = start_result_dict["session_id"]
     print(f"Started session: {session_id}")
@@ -236,7 +236,7 @@ async def test_nova_act_workflow_with_log_compression():
             "session_id": session_id,
             "instruction": instruction,
         }
-        execute_result_dict = _as_dict(await browser_session(**execute_params))
+        execute_result_dict = _as_dict(await nova_mcp.browser_session(**execute_params))
         assert execute_result_dict.get("success") is True, f"Instruction execution failed: {execute_result_dict}"
         # Wait between instructions
         await asyncio.sleep(2)
@@ -348,7 +348,7 @@ async def test_nova_act_workflow_with_log_compression():
     # 8. End the session
     print("\nTesting: control_browser (end)")
     end_params = {"action": "end", "session_id": session_id}
-    end_result_dict = _as_dict(await browser_session(**end_params))
+    end_result_dict = _as_dict(await nova_mcp.browser_session(**end_params))
     assert end_result_dict.get("status") == "ended", f"End action did not report ended status: {end_result_dict}"
     print(f"Session ended: {session_id}")
     
