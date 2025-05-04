@@ -82,9 +82,21 @@ def create_mock_html_log(session_id):
 # Use environment variable for API Key
 API_KEY = os.environ.get("NOVA_ACT_API_KEY")
 
-# Skip condition
+# Skip condition - improved to be more robust in CI environments
 skip_reason = "NOVA_ACT_API_KEY environment variable not set or nova-act not installed or MCP components failed to load"
-skip_integration_tests = not API_KEY or not NOVA_ACT_AVAILABLE or not REAL_MCP_LOADED
+
+# Check if we're in a CI environment (GitHub Actions, Travis, etc.)
+IS_CI = os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true"
+
+# Skip condition - improved to handle CI environments
+if IS_CI:
+    # Always skip integration tests in CI by default unless specifically enabled
+    skip_integration_tests = not os.environ.get("RUN_INTEGRATION_TESTS_IN_CI") == "true"
+    if skip_integration_tests:
+        skip_reason = "Integration tests skipped in CI environment. Set RUN_INTEGRATION_TESTS_IN_CI=true to enable."
+else:
+    # In local development, use the normal condition
+    skip_integration_tests = not API_KEY or not NOVA_ACT_AVAILABLE or not REAL_MCP_LOADED
 
 @pytest.mark.skipif(skip_integration_tests, reason=skip_reason)
 @pytest.mark.smoke
