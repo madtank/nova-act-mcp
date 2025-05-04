@@ -410,7 +410,8 @@ async def browser_session():
     # Skip if running in CI or no API key
     if skip_integration_tests:
         pytest.skip(skip_reason)
-        return "mock-skipped-session-id"
+        yield "mock-skipped-session-id"  # Use yield instead of return for consistency
+        return  # Early return after yield for skipped tests
         
     # Generate a unique session ID
     session_id = str(uuid.uuid4())
