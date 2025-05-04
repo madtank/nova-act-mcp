@@ -407,6 +407,11 @@ TEST_TIMEOUT = 180  # seconds
 @pytest_asyncio.fixture(scope="function")  # Changed to function scope and using pytest_asyncio
 async def browser_session():
     """Create a browser session for a test."""
+    # Skip if running in CI or no API key
+    if skip_integration_tests:
+        pytest.skip(skip_reason)
+        return "mock-skipped-session-id"
+        
     # Generate a unique session ID
     session_id = str(uuid.uuid4())
     
@@ -453,6 +458,8 @@ def get_response_text(response):
     return str(result)
 
 # Simple standalone test
+@pytest.mark.skipif(skip_integration_tests, reason=skip_reason)
+@pytest.mark.smoke
 @pytest.mark.asyncio
 async def test_session_basics():
     """Test opening and closing a browser session."""
@@ -481,6 +488,7 @@ async def test_session_basics():
     end_result = await nova_mcp.browser_session(**end_params)
 
 # Tests for the Basic NL Suite
+@pytest.mark.skipif(skip_integration_tests, reason=skip_reason)
 @pytest.mark.asyncio
 class TestBasicNLSuite:
     """Tests for basic form interactions like checkboxes and dropdowns"""
@@ -552,6 +560,7 @@ class TestBasicNLSuite:
         assert "success" in response_text.lower() or "selected" in response_text.lower(), f"Failed to select option: {response_text}"
 
 # Tests for Form NL Suite
+@pytest.mark.skipif(skip_integration_tests, reason=skip_reason)
 @pytest.mark.asyncio
 class TestFormNLSuite:
     """Tests for form submission and login functionality"""
