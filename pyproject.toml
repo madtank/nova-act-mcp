@@ -1,6 +1,6 @@
 [project]
 name = "nova-act-mcp-server"
-version = "0.2.6"  # Bumped version for test reliability fixes
+version = "0.2.7"  # Bumped version for inline screenshots feature
 description = "An MCP server providing tools to control web browsers using the Amazon Nova Act SDK"
 authors = [
     {name = "Jacob Taunton", email = "jandrewt82@gmail.com"}

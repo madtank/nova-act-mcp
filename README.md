@@ -3,7 +3,21 @@
 
 **nova‑act‑mcp‑server** is a zero‑install [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that exposes [Amazon Nova Act](https://nova.amazon.com/act) browser‑automation tools.
 
-## What's New in v0.2.5
+## What's New in v0.2.7
+- **Automatic Inline Screenshots**: Every browser action now includes an optimized screenshot
+- Improved screenshot quality and reliability for AI agents
+- Added environment variables to customize screenshot quality and size limits
+- Comprehensive test coverage ensuring screenshots work in all scenarios
+
+### New Feature: Inline Screenshots
+
+Every successful `execute` response now contains `inline_screenshot`, a base64-encoded JPEG of the current viewport:
+- Quality ≈ 45, hard-capped at 250 KB (configurable via `NOVA_MCP_MAX_INLINE_IMG` env variable)
+- If the raw JPEG is larger than the cap, the field is `null`
+- No extra API calls needed - screenshots are included automatically
+- For full-resolution images and HAR/HTML logs, use the `compress_logs` tool
+
+## What's New in v0.2.6
 - Added compatibility with NovaAct SDK 0.9+ by normalizing log directory handling
 - Improved test organization with clear markers for unit, mock, smoke and e2e tests
 - Moved mock HTML creation logic from production code to test helpers

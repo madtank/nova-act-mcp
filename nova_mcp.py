@@ -17,7 +17,7 @@ import time
 import traceback
 import uuid  # Added for unique session dirs
 from pathlib import Path
-from typing import Any, Dict, Optional, Literal, List, Tuple, Union
+from typing import Any, Dict, Optional, Literal, List, Tuple, Union, Annotated
 import importlib.metadata  # For version info in main()
 
 # Third-party imports
@@ -34,6 +34,10 @@ DEFAULT_TIMEOUT = 180  # 3 minutes per step
 PROGRESS_INTERVAL = 5  # Send progress updates every 5 seconds
 MAX_RETRY_ATTEMPTS = 2  # Maximum retry attempts for failed steps
 SCREENSHOT_QUALITY = 45  # JPEG quality for screenshots (lower = smaller file size)
+
+# === Screenshot compression/embedding limits ===
+MAX_INLINE_IMAGE_BYTES = int(os.getenv("NOVA_MCP_MAX_INLINE_IMG", "256000"))  # ≈250 KB
+INLINE_IMAGE_QUALITY   = int(os.getenv("NOVA_MCP_INLINE_IMG_QUALITY", "45"))   # JPEG quality
 
 # User profiles directory - Now determined dynamically
 # PROFILES_DIR = "./profiles" # Removed
@@ -645,7 +649,7 @@ async def browser_session(
     session_id: Optional[str] = None,
     url: Optional[str] = None,
     instruction: Optional[str] = None,
-    headless: bool = True,  # Changed default to True
+    headless: Annotated[bool, "Run browser in headless mode"] = True,
     username: Optional[str] = None,
     password: Optional[str] = None,
     schema: Optional[dict] = None,
@@ -1442,6 +1446,18 @@ async def browser_session(
                         final_html_log_path_for_reporting = path
                         break
 
+                # NEW: Capture a screenshot for inline embedding in the response
+                inline_b64 = None
+                try:
+                    raw = nova_instance.page.screenshot(type="jpeg",
+                                                        quality=INLINE_IMAGE_QUALITY)
+                    if len(raw) <= MAX_INLINE_IMAGE_BYTES:
+                        inline_b64 = "data:image/jpeg;base64," + base64.b64encode(raw).decode()
+                    else:
+                        log(f"[{session_id}] Screenshot too big for inline ({len(raw)} B)")
+                except Exception as e:
+                    log(f"[{session_id}] Inline-screenshot error: {e}")
+
                 # Format agent thinking for MCP response
                 agent_thinking_mcp = [] # Use different variable name to avoid confusion
                 for message in agent_messages:
@@ -1474,6 +1490,7 @@ async def browser_session(
                     "success": True, # Indicate logical success of the operation
                     "current_url": updated_url, # Add current URL for context
                     "page_title": page_title, # Add page title for context
+                    "inline_screenshot": inline_b64,  # NEW: Include the inline screenshot
                 }
 
                 # Include debug info if in debug mode
@@ -1697,6 +1714,7 @@ def compress_log_file(log_path, extract_screenshots=True, compression_level=9):
         screenshot_dir = None
         screenshots = []  # Store extracted screenshots for preview
         screenshot_paths = []  # Store paths to the extracted screenshots
+        inline_screenshots = []  # NEW: Store embeddable screenshots
         
         if extract_screenshots:
             screenshot_dir = os.path.join(os.path.dirname(log_path), "screenshots")
@@ -1715,16 +1733,25 @@ def compress_log_file(log_path, extract_screenshots=True, compression_level=9):
                             # If it's a data URL, extract the base64 data
                             if screenshot_data.startswith('data:image'):
                                 base64_data = screenshot_data.split(',', 1)[1]
-                                f.write(base64.b64decode(base64_data))
+                                raw = base64.b64decode(base64_data)
+                                f.write(raw)
                             else:
                                 # Assume it's already base64
                                 try:
-                                    f.write(base64.b64decode(screenshot_data))
+                                    raw = base64.b64decode(screenshot_data)
+                                    f.write(raw)
                                 except:
                                     # If decoding fails, write as text
-                                    f.write(screenshot_data.encode('utf-8'))
+                                    raw = screenshot_data.encode('utf-8')
+                                    f.write(raw)
                         # Record the screenshot path in the data
                         entry["request"]["screenshot_path"] = screenshot_path
+                        # NEW: add to inline payload if small enough
+                        if isinstance(raw, bytes) and len(raw) <= MAX_INLINE_IMAGE_BYTES:
+                            inline_screenshots.append({
+                                "filename": Path(screenshot_path).name,
+                                "data": f"data:image/jpeg;base64,{base64.b64encode(raw).decode()}"
+                            })
                     except Exception as e:
                         log(f"Error saving screenshot {i}: {str(e)}")
         
@@ -1799,7 +1826,8 @@ def compress_log_file(log_path, extract_screenshots=True, compression_level=9):
             "preview": {
                 "first_50_bytes": compressed_data[:50].hex(),  # quick check it's valid gzip
                 "first_50_b64_of_screenshot": first_screenshot_preview
-            }
+            },
+            "inline_screenshots": inline_screenshots  # NEW: embeddable screenshots
         }
         
         log(f"Log compression complete: {result['size_reduction_compressed']}% reduction")
