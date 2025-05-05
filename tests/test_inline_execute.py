@@ -39,15 +39,14 @@ async def test_execute_returns_inline_image():
     img = res.get("inline_screenshot")
     assert img and img.startswith("data:image/jpeg;base64,")
 
-    # Print the base64 image data for visual verification
-    print("\n\nINLINE SCREENSHOT DATA:")
-    print(img)
-    print("\n")
+    # Print the base64 image data for visual verification (shorter output)
+    print(f"\n\nINLINE (first 80): {img[:80]} … {len(img)} bytes")
+
+    # Assert that the image is also in the content array (new in Option B)
+    assert any(
+        c.get("type") == "image_base64" for c in res["content"]
+    ), "Image element missing from result.content"
 
     payload = base64.b64decode(img.split(",", 1)[1])
     assert payload[:3] == b"\xFF\xD8\xFF"  # JPEG SOI bytes
     assert len(payload) <= MAX_INLINE_IMAGE_BYTES
-    
-    # Print image size info
-    print(f"Image size: {len(payload)} bytes ({len(payload)/1024:.2f} KB)")
-    print(f"Size limit: {MAX_INLINE_IMAGE_BYTES} bytes ({MAX_INLINE_IMAGE_BYTES/1024:.2f} KB)")

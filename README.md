@@ -3,6 +3,12 @@
 
 **nova‑act‑mcp‑server** is a zero‑install [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that exposes [Amazon Nova Act](https://nova.amazon.com/act) browser‑automation tools.
 
+## What's New in v0.2.8
+- **Enhanced Inline Screenshots**: Screenshots now appear directly in the response `content` array
+- Improved compatibility with vision-capable models like Claude
+- Screenshots include descriptive captions based on the executed instruction
+- Each screenshot is delivered as `{ type: "image_base64", data: "..." }` in the content array
+
 ## What's New in v0.2.7
 - **Automatic Inline Screenshots**: Every browser action now includes an optimized screenshot
 - Improved screenshot quality and reliability for AI agents

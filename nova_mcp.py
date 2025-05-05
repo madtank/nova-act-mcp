@@ -606,42 +606,9 @@ async def view_html_log(
 @mcp.tool(
     name="control_browser",
     description=(
-        """Controls web browser sessions via Nova Act.
-        Actions:
-        - start: Opens browser with required 'url'. Optional 'headless' (default: True). Returns 'session_id'.
-        - execute: Performs actions with required 'session_id'.
-            - 'url': Navigate to a new page (use full URL)
-            - 'instruction': Natural language command (e.g., "click login button")
-            - 'username'/'password': For authentication forms
-            - 'schema': Extract structured data in JSON format (auto-detects page elements or accepts custom extraction templates)
-        - end: Closes session (requires 'session_id')
-
-        Returns session details including current URL/title and execution log path. 
-        HTTP logs are available as hyperlinks in the response when containing notable information.
-
-        After any execute, the last HTML log can be fetched with view_html_log { "session_id": ... } - no file paths needed.
-
-        Form Element Tips:
-        - Dropdowns: Use "select [option name] from dropdown" or "choose [option name] from the dropdown menu"
-        - Checkboxes:
-            - Actions: "check the checkbox labeled [label]" or "uncheck the checkbox labeled [label]"
-            - Verification: "identify all checkboxes and their states" or use schema for reliable verification
-        - Radio buttons: Use "select the radio button labeled [label]"
-        - Input fields: Use "type [text] into the [field name] field"
-
-        Error Handling:
-        - Element not found: Returns error message with page context
-        - Timeouts: Default 30-second timeout with automatic retry (configurable)
-        - Execution errors: Detailed logs available for troubleshooting
-
-        Note: For verifying form element states, prefer using the schema parameter or "identify" instructions
-        rather than "check if" or "verify" which might be interpreted as toggle actions.
-
-        Example workflow: Start with URL → search for specific product → 
-        find product → add to cart → login → share items in cart for logged-in user
-
-        Schema example: Use 'schema': {"products": {"selector": ".product-item", "fields": {"name": ".title", "price": ".price"}}}
-        or simply 'schema': {"extract": "products"} to auto-detect common elements"""
+        "Start, operate and end a Nova Act browser session. "
+        "Every successful **execute** result includes a low‑res "
+        "base‑64 viewport screenshot as `content[type=image_base64]`."
     ),
 )
 async def browser_session(
@@ -1490,18 +1457,21 @@ async def browser_session(
                     "success": True, # Indicate logical success of the operation
                     "current_url": updated_url, # Add current URL for context
                     "page_title": page_title, # Add page title for context
-                    "inline_screenshot": inline_b64,  # NEW: Include the inline screenshot
                 }
 
-                # Include debug info if in debug mode
-                if DEBUG_MODE:
-                    mcp_result_value["debug"] = {
-                        "html_paths_found": absolute_html_output_paths,
-                        "html_log_path_selected_for_reporting": final_html_log_path_for_reporting,
-                        "extraction_info": debug_info,
-                        # Avoid putting potentially large response object in debug if already in main text
-                        # "response_object": response_content,
-                    }
+                # Add inline screenshot to result
+                if inline_b64:
+                    # Keep the old field for now (debuggers & existing tests)
+                    mcp_result_value["inline_screenshot"] = inline_b64
+
+                    # 👉 NEW – the bit Claude/vision chains will actually consume
+                    mcp_result_value["content"].insert(0, {
+                        "type": "image_base64",
+                        "data": inline_b64,
+                        "caption": (
+                            f"Screenshot after: {instruction[:60]}…" if instruction else "Viewport"
+                        )
+                    })
 
                 return mcp_result_value # Return the dictionary for the "result" field
 
