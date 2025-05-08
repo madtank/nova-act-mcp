@@ -607,8 +607,7 @@ async def view_html_log(
     name="control_browser",
     description=(
         "Start, operate and end a Nova Act browser session. "
-        "Every successful **execute** result includes a low‑res "
-        "base‑64 viewport screenshot as `content[type=image_base64]`."
+        "Use 'inspect_browser' to get screenshots of the current browser state."
     ),
 )
 async def browser_session(
@@ -1221,22 +1220,7 @@ async def browser_session(
                 page_title = nova_instance.page.title()
                 log(f"[{session_id}] Action completed. Current URL: {updated_url}, Title: {page_title}")
 
-                # --- Reliable Inline Screenshot Embedding ---
-                inline_b64 = None
-                screenshot_status_message = None # To inform agent if screenshot omitted
-                try:
-                    log(f"[{session_id}] Attempting to capture inline screenshot for execute response.")
-                    raw_screenshot_bytes = nova_instance.page.screenshot(type="jpeg", quality=INLINE_IMAGE_QUALITY)
-                    if len(raw_screenshot_bytes) <= MAX_INLINE_IMAGE_BYTES:
-                        inline_b64 = "data:image/jpeg;base64," + base64.b64encode(raw_screenshot_bytes).decode()
-                        log(f"[{session_id}] Inline screenshot captured ({len(raw_screenshot_bytes)} bytes).")
-                    else:
-                        screenshot_status_message = f"Screenshot captured but too large for inline ({len(raw_screenshot_bytes)}B > {MAX_INLINE_IMAGE_BYTES}B limit). Use compress_logs or view_html_log."
-                        log(f"[{session_id}] {screenshot_status_message}")
-                except Exception as e:
-                    screenshot_status_message = f"Error capturing inline screenshot: {str(e)}"
-                    log(f"[{session_id}] {screenshot_status_message}")
-                    if VERBOSE_LOGGING: log(traceback.format_exc())
+                # No longer capturing screenshots in execute - use inspect_browser instead
 
                 # Look for the output HTML file in the logs (only if we used nova.act)
                 html_output_path = None # Temporary variable for path finding
@@ -1563,32 +1547,11 @@ async def browser_session(
                 # Format agent thinking for MCP response
                 agent_thinking_mcp = [] # Use different variable name to avoid confusion
                 
-                # Add screenshot status message to agent_thinking if present
-                if screenshot_status_message:
-                    agent_thinking_mcp.append({
-                        "type": "system_warning",
-                        "content": screenshot_status_message,
-                        "source": "nova_mcp"
-                    })
-                    log(f"[{session_id}] Added screenshot status message to agent_thinking: {screenshot_status_message}")
-
                 # Add any agent reasoning messages from NovaAct
                 for message in agent_messages:
                     agent_thinking_mcp.append(
                         {"type": "reasoning", "content": message, "source": "nova_act"}
                     )
-
-                # NEW: Capture a screenshot for inline embedding in the response
-                inline_b64 = None
-                try:
-                    raw = nova_instance.page.screenshot(type="jpeg",
-                                                        quality=INLINE_IMAGE_QUALITY)
-                    if len(raw) <= MAX_INLINE_IMAGE_BYTES:
-                        inline_b64 = "data:image/jpeg;base64," + base64.b64encode(raw).decode()
-                    else:
-                        log(f"[{session_id}] Screenshot too big for inline ({len(raw)} B)")
-                except Exception as e:
-                    log(f"[{session_id}] Inline-screenshot error: {e}")
 
                 # Create result properly formatted for JSON-RPC result field
                 action_type = (
@@ -1616,20 +1579,6 @@ async def browser_session(
                     "current_url": updated_url, # Add current URL for context
                     "page_title": page_title, # Add page title for context
                 }
-
-                # Add inline screenshot to result
-                if inline_b64:
-                    # Keep the old field for now (debuggers & existing tests)
-                    mcp_result_value["inline_screenshot"] = inline_b64
-
-                    # 👉 NEW – the bit Claude/vision chains will actually consume
-                    mcp_result_value["content"].insert(0, {
-                        "type": "image_base64",
-                        "data": inline_b64,
-                        "caption": (
-                            f"Screenshot after: {instruction[:60]}…" if instruction else "Viewport"
-                        )
-                    })
 
                 return mcp_result_value # Return the dictionary for the "result" field
 
@@ -2408,6 +2357,108 @@ def _normalize_logs_dir(nova_instance):
                 break
                 
     return logs_dir
+
+
+@mcp.tool(
+    name="inspect_browser",
+    description=(
+        "Inspect the current state of an active browser session without performing any action. "
+        "Returns the current URL, page title, and captures a screenshot of the viewport. "
+        "Use this tool to get visual feedback without performing any browser actions."
+    )
+)
+async def inspect_browser(session_id: str) -> Dict[str, Any]:
+    """
+    Retrieves the current URL, title, and a screenshot of the specified browser session.
+    
+    Args:
+        session_id: The ID of the active browser session to inspect
+        
+    Returns:
+        A dictionary containing the current state of the browser, including URL,
+        page title, and (if possible) an inline screenshot
+    """
+    initialize_environment()
+    log(f"[{session_id}] Received inspect_browser request.")
+
+    with session_lock:
+        session_data = active_sessions.get(session_id)
+
+    if not session_data or session_data.get("status") == "ended":
+        log(f"[{session_id}] Inspect failed: Session not active.")
+        return {"error": {"code": -32602, "message": f"No active session found: {session_id}", "data": None}}
+
+    nova_instance = session_data.get("nova_instance")
+    executor = session_data.get("executor")
+
+    if not nova_instance or not executor:
+        log(f"[{session_id}] Inspect failed: Missing Nova instance or executor.")
+        return {"error": {"code": -32603, "message": f"Internal error for session: {session_id}", "data": None}}
+
+    # Define synchronous inspection logic
+    def _sync_inspect():
+        log(f"[{session_id}] Getting current page state...")
+        current_url = "Error: Could not get URL"
+        page_title = "Error: Could not get title"
+        inline_b64 = None
+        screenshot_status_message = None
+
+        try:
+            current_url = nova_instance.page.url
+            page_title = nova_instance.page.title()
+            log(f"[{session_id}] Current state: URL={current_url}, Title={page_title}")
+        except Exception as state_e:
+            log(f"[{session_id}] Error getting URL/Title: {state_e}")
+
+        # Capture screenshot
+        try:
+            log(f"[{session_id}] Attempting screenshot capture for inspect.")
+            raw_screenshot_bytes = nova_instance.page.screenshot(type="jpeg", quality=INLINE_IMAGE_QUALITY)
+            if len(raw_screenshot_bytes) <= MAX_INLINE_IMAGE_BYTES:
+                inline_b64 = "data:image/jpeg;base64," + base64.b64encode(raw_screenshot_bytes).decode()
+                log(f"[{session_id}] Screenshot captured ({len(raw_screenshot_bytes)} bytes).")
+            else:
+                screenshot_status_message = f"Screenshot captured but too large for inline response ({len(raw_screenshot_bytes)}B > {MAX_INLINE_IMAGE_BYTES}B limit). Use 'compress_logs_tool' then 'fetch_file'."
+                log(f"[{session_id}] {screenshot_status_message}")
+        except Exception as e:
+            screenshot_status_message = f"Error capturing screenshot: {str(e)}"
+            log(f"[{session_id}] Screenshot capture failed: {screenshot_status_message}")
+
+        # Prepare result content
+        content_list = [{"type": "text", "text": f"Current URL: {current_url}\nPage Title: {page_title}"}]
+        if inline_b64:
+            content_list.insert(0, {
+                "type": "image_base64",
+                "data": inline_b64,
+                "caption": "Current viewport"
+            })
+
+        agent_thinking = []
+        if screenshot_status_message:
+            agent_thinking.append({
+                "type": "system_warning", 
+                "content": screenshot_status_message,
+                "source": "nova_mcp"
+            })
+
+        # Return result structure for FastMCP
+        return {
+            "session_id": session_id,
+            "current_url": current_url,
+            "page_title": page_title,
+            "content": content_list,
+            "agent_thinking": agent_thinking,
+            "success": True # Inspection itself succeeded
+        }
+
+    # Run inspection in the session's thread
+    try:
+        result_value = await asyncio.get_event_loop().run_in_executor(executor, _sync_inspect)
+        return result_value # Return the dictionary for the 'result' field
+    except Exception as e:
+        error_message = str(e)
+        log(f"[{session_id}] Error during inspect_browser execution: {error_message}")
+        return {"error": {"code": -32603, "message": f"Error inspecting browser: {error_message}", "data": {"session_id": session_id}}}
 
 
 def main():
