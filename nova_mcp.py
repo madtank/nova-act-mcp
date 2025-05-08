@@ -758,6 +758,34 @@ async def browser_session(
                         f"[{session_id}] Warning: nova_instance does not have a callable start() method!"
                     )
 
+                # --- CRITICAL: Capture and store the specific logs directory ---
+                base_logs_dir_from_sdk = _normalize_logs_dir(nova_instance)
+                nova_act_internal_session_id = getattr(nova_instance, 'session_id', None)
+                final_session_specific_logs_dir = None
+
+                if base_logs_dir_from_sdk and nova_act_internal_session_id:
+                    # NovaAct often creates a subdirectory named after its internal session_id
+                    candidate_specific_dir = Path(base_logs_dir_from_sdk) / nova_act_internal_session_id
+                    if candidate_specific_dir.is_dir():
+                        final_session_specific_logs_dir = str(candidate_specific_dir.resolve())
+                        log(f"[{session_id}] Confirmed NovaAct session-specific logs directory: {final_session_specific_logs_dir}")
+                    elif Path(base_logs_dir_from_sdk).name == nova_act_internal_session_id:
+                        # Sometimes the SDK attribute already points to the specific session dir
+                        final_session_specific_logs_dir = str(Path(base_logs_dir_from_sdk).resolve())
+                        log(f"[{session_id}] Using logs_dir attribute directly as session-specific: {final_session_specific_logs_dir}")
+                    else:
+                        # Fallback: If SDK provides a base and subdir isn't immediately there,
+                        # it might be created on the first `act`. Store base for now.
+                        final_session_specific_logs_dir = str(Path(base_logs_dir_from_sdk).resolve())
+                        log(f"[{session_id}] Storing base NovaAct logs directory: {final_session_specific_logs_dir}. May be refined by first 'act'.")
+                elif base_logs_dir_from_sdk: # No internal session ID from SDK, but got a base logs_dir
+                    final_session_specific_logs_dir = str(Path(base_logs_dir_from_sdk).resolve())
+                    log(f"[{session_id}] Storing provided base NovaAct logs directory (no internal session ID from SDK): {final_session_specific_logs_dir}")
+                else:
+                    log(f"[{session_id}] CRITICAL WARNING: Could not retrieve logs_dir from NovaAct instance at start. Log discovery for subsequent tools will be impacted.")
+                    if VERBOSE_LOGGING: # Help debug if logs_dir is missing
+                        log(f"[{session_id}] Attributes of nova_instance: {dir(nova_instance)}")
+
                 # Now it should be safe to access nova_instance.page
                 log(f"[{session_id}] Accessing page properties...")
 
@@ -1191,7 +1219,24 @@ async def browser_session(
                 # Get updated page state AFTER the action
                 updated_url = nova_instance.page.url
                 page_title = nova_instance.page.title()
-                log(f"[{session_id}] Action completed. Current URL: {updated_url}")
+                log(f"[{session_id}] Action completed. Current URL: {updated_url}, Title: {page_title}")
+
+                # --- Reliable Inline Screenshot Embedding ---
+                inline_b64 = None
+                screenshot_status_message = None # To inform agent if screenshot omitted
+                try:
+                    log(f"[{session_id}] Attempting to capture inline screenshot for execute response.")
+                    raw_screenshot_bytes = nova_instance.page.screenshot(type="jpeg", quality=INLINE_IMAGE_QUALITY)
+                    if len(raw_screenshot_bytes) <= MAX_INLINE_IMAGE_BYTES:
+                        inline_b64 = "data:image/jpeg;base64," + base64.b64encode(raw_screenshot_bytes).decode()
+                        log(f"[{session_id}] Inline screenshot captured ({len(raw_screenshot_bytes)} bytes).")
+                    else:
+                        screenshot_status_message = f"Screenshot captured but too large for inline ({len(raw_screenshot_bytes)}B > {MAX_INLINE_IMAGE_BYTES}B limit). Use compress_logs or view_html_log."
+                        log(f"[{session_id}] {screenshot_status_message}")
+                except Exception as e:
+                    screenshot_status_message = f"Error capturing inline screenshot: {str(e)}"
+                    log(f"[{session_id}] {screenshot_status_message}")
+                    if VERBOSE_LOGGING: log(traceback.format_exc())
 
                 # Look for the output HTML file in the logs (only if we used nova.act)
                 html_output_path = None # Temporary variable for path finding
@@ -1405,6 +1450,108 @@ async def browser_session(
                     else:
                          log(f"[{session_id}] Session disappeared before results could be stored.")
 
+                # --- Refined Log Path Discovery & Storage ---
+                # Get base logs_dir and nova_act_session_id stored during "start"
+                session_data_locked = active_sessions.get(session_id, {}) # Read from shared dict safely if needed
+                current_mcp_session_logs_dir = session_data_locked.get('logs_dir')
+                current_nova_act_session_id = session_data_locked.get('nova_session_id')
+                
+                # The logs_dir stored at "start" might be a base. Refine if NovaAct created its session_id subdir.
+                if current_mcp_session_logs_dir and current_nova_act_session_id and \
+                   not Path(current_mcp_session_logs_dir).name == current_nova_act_session_id:
+                    
+                    candidate_specific_dir = Path(current_mcp_session_logs_dir) / current_nova_act_session_id
+                    if candidate_specific_dir.is_dir():
+                        current_mcp_session_logs_dir = str(candidate_specific_dir.resolve())
+                        log(f"[{session_id}] Refined logs_dir to NovaAct session specific: {current_mcp_session_logs_dir}")
+                        with session_lock: # Update in shared dict
+                            if session_id in active_sessions: active_sessions[session_id]['logs_dir'] = current_mcp_session_logs_dir
+                    # If logs_dir from SDK is already specific, use it
+                    elif _normalize_logs_dir(nova_instance) and Path(_normalize_logs_dir(nova_instance)).name == current_nova_act_session_id:
+                        current_mcp_session_logs_dir = str(Path(_normalize_logs_dir(nova_instance)).resolve())
+                        log(f"[{session_id}] Updated logs_dir from SDK to specific: {current_mcp_session_logs_dir}")
+                        with session_lock:
+                            if session_id in active_sessions: active_sessions[session_id]['logs_dir'] = current_mcp_session_logs_dir
+
+                # Extract act_id from result.metadata
+                current_act_id = getattr(result.metadata, 'act_id', None) if result and hasattr(result, 'metadata') else None
+                
+                absolute_html_output_paths_for_this_act = []
+                har_json_path_for_this_act = None
+
+                if current_act_id and current_mcp_session_logs_dir and Path(current_mcp_session_logs_dir).is_dir():
+                    log(f"[{session_id}] Searching for logs for act_id '{current_act_id}' in: {current_mcp_session_logs_dir}")
+                    
+                    # HTML output path for this specific act
+                    constructed_html_path = Path(current_mcp_session_logs_dir) / f"act_{current_act_id}_output.html"
+                    if constructed_html_path.exists():
+                        html_path_val = str(constructed_html_path.resolve())
+                        log(f"[{session_id}] Found HTML path for this act: {html_path_val}")
+                        absolute_html_output_paths_for_this_act.append(html_path_val)
+                    else:
+                        log(f"[{session_id}] WARNING: Constructed HTML path for this act does not exist: {constructed_html_path}")
+
+                    # HAR/JSON calls path for this specific act
+                    constructed_calls_json_path = Path(current_mcp_session_logs_dir) / f"act_{current_act_id}_calls.json"
+                    if constructed_calls_json_path.exists():
+                        har_json_path_for_this_act = str(constructed_calls_json_path.resolve())
+                        log(f"[{session_id}] Found HAR JSON path for this act: {har_json_path_for_this_act}")
+                    else:
+                        log(f"[{session_id}] WARNING: Constructed calls.json path for this act does not exist: {constructed_calls_json_path}")
+                elif not current_act_id:
+                     log(f"[{session_id}] WARNING: No act_id from NovaAct result.metadata, cannot construct specific log paths.")
+                elif not (current_mcp_session_logs_dir and Path(current_mcp_session_logs_dir).is_dir()):
+                     log(f"[{session_id}] WARNING: logs_dir ('{current_mcp_session_logs_dir}') is not valid for log path construction.")
+
+
+                # Fallback to SDK's last known paths if direct construction failed
+                if not absolute_html_output_paths_for_this_act and hasattr(nova_instance, "last_output_html_path") and nova_instance.last_output_html_path:
+                    sdk_html_path = str(Path(nova_instance.last_output_html_path).resolve())
+                    if Path(sdk_html_path).exists():
+                        log(f"[{session_id}] Using SDK's last_output_html_path: {sdk_html_path}")
+                        absolute_html_output_paths_for_this_act.append(sdk_html_path)
+                
+                if not har_json_path_for_this_act:
+                    for attr in ("last_calls_json_path", "last_har_path", "last_output_calls_json_path"):
+                        candidate = getattr(nova_instance, attr, None)
+                        if candidate and Path(candidate).exists():
+                            har_json_path_for_this_act = str(Path(candidate).resolve())
+                            log(f"[{session_id}] Using SDK's {attr}: {har_json_path_for_this_act}")
+                            break
+                
+                # Store these specific paths in the current step's result entry
+                with session_lock:
+                    if session_id in active_sessions and active_sessions[session_id].get("results"):
+                        # Assuming result_entry was just appended to active_sessions[session_id]["results"]
+                        # by the preceding code block that created it.
+                        # Let's ensure we are updating the correct (last) result entry.
+                        if active_sessions[session_id]["results"]:
+                            last_result_entry = active_sessions[session_id]["results"][-1]
+                            last_result_entry["output_html_paths"] = absolute_html_output_paths_for_this_act
+                            if har_json_path_for_this_act:
+                                last_result_entry["har_json_path"] = har_json_path_for_this_act
+                                # Also update the session-level 'last_har_path' for convenience for compress_logs
+                                active_sessions[session_id]["last_har_path"] = har_json_path_for_this_act
+                        else:
+                            log(f"[{session_id}] WARNING: 'results' list is empty, cannot store log paths for this step.")
+                    else:
+                        log(f"[{session_id}] WARNING: Session or results list not found, cannot store log paths.")
+
+                # --- Agent Thinking Extraction ---
+                # Use the most recently found HTML path for thinking extraction
+                final_html_log_path_for_thinking = None
+                if absolute_html_output_paths_for_this_act: # This list now contains paths for *this* act
+                    # If multiple, could sort by mtime, but usually it's just one from current_act_id
+                    absolute_html_output_paths_for_this_act.sort(key=lambda p: Path(p).stat().st_mtime, reverse=True)
+                    final_html_log_path_for_thinking = absolute_html_output_paths_for_this_act[0]
+                    log(f"[{session_id}] Using HTML log for thinking extraction: {final_html_log_path_for_thinking}")
+
+                agent_messages, debug_info = extract_agent_thinking(
+                    result,
+                    nova_instance,
+                    final_html_log_path_for_thinking,
+                    instruction_to_execute,
+                )
 
                 # Find the first valid HTML log path from the stored list for reporting
                 final_html_log_path_for_reporting = None
@@ -1412,6 +1559,24 @@ async def browser_session(
                     if path and os.path.exists(path):
                         final_html_log_path_for_reporting = path
                         break
+
+                # Format agent thinking for MCP response
+                agent_thinking_mcp = [] # Use different variable name to avoid confusion
+                
+                # Add screenshot status message to agent_thinking if present
+                if screenshot_status_message:
+                    agent_thinking_mcp.append({
+                        "type": "system_warning",
+                        "content": screenshot_status_message,
+                        "source": "nova_mcp"
+                    })
+                    log(f"[{session_id}] Added screenshot status message to agent_thinking: {screenshot_status_message}")
+
+                # Add any agent reasoning messages from NovaAct
+                for message in agent_messages:
+                    agent_thinking_mcp.append(
+                        {"type": "reasoning", "content": message, "source": "nova_act"}
+                    )
 
                 # NEW: Capture a screenshot for inline embedding in the response
                 inline_b64 = None
@@ -1424,13 +1589,6 @@ async def browser_session(
                         log(f"[{session_id}] Screenshot too big for inline ({len(raw)} B)")
                 except Exception as e:
                     log(f"[{session_id}] Inline-screenshot error: {e}")
-
-                # Format agent thinking for MCP response
-                agent_thinking_mcp = [] # Use different variable name to avoid confusion
-                for message in agent_messages:
-                    agent_thinking_mcp.append(
-                        {"type": "reasoning", "content": message, "source": "nova_act"}
-                    )
 
                 # Create result properly formatted for JSON-RPC result field
                 action_type = (
