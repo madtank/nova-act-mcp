@@ -585,7 +585,7 @@ wheels = [
 
 [[package]]
 name = "nova-act"
-version = "1.0.2408.0"
+version = "1.0.2579.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
@@ -601,12 +601,12 @@ dependencies = [
     { name = "retry" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a9/3e/6387b0687203e73cfab7d27a978b0989e4a4f9c3a510766d19c1edc0347c/nova_act-1.0.2408.0-py3-none-any.whl", hash = "sha256:9f41bde372afe5a18dd362ca3cdbc1f5bee89aa14a15e3c66dfa47da3c1f8b7b", size = 4233978 },
+    { url = "https://files.pythonhosted.org/packages/a4/06/a3e07f0660778d3802b93d7c4c328e54c44ca1b8a5132c5dc3fd40162c49/nova_act-1.0.2579.0-py3-none-any.whl", hash = "sha256:b0095c6235070b1f41f0688d176216a1354ad22507682c389278556e3330d079", size = 5691579 },
 ]
 
 [[package]]
 name = "nova-act-mcp-server"
-version = "0.2.4"
+version = "3.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "asyncio-extras" },
@@ -616,6 +616,7 @@ dependencies = [
     { name = "nova-act" },
     { name = "playwright" },
     { name = "pydantic" },
+    { name = "python-dotenv" },
     { name = "rich" },
     { name = "structlog" },
     { name = "tenacity" },
@@ -630,7 +631,6 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-dotenv" },
-    { name = "python-dotenv" },
     { name = "ruff" },
 ]
 
@@ -643,13 +643,13 @@ requires-dist = [
     { name = "isort", marker = "extra == 'dev'", specifier = ">=6.0.1" },
     { name = "mcp", specifier = ">=1.6.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.15.0" },
-    { name = "nova-act", specifier = ">=1.0.2408.0" },
+    { name = "nova-act", specifier = ">=1.0.2579.0" },
     { name = "playwright", specifier = "==1.48.0" },
     { name = "pydantic", specifier = ">=2.11.4" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.5" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.26.0" },
     { name = "pytest-dotenv", marker = "extra == 'dev'", specifier = ">=0.5.2" },
-    { name = "python-dotenv", marker = "extra == 'dev'", specifier = ">=1.0.0" },
+    { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "rich", specifier = ">=14.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.11.7" },
     { name = "structlog", specifier = ">=25.3.0" },

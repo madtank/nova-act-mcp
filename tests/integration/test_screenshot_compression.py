@@ -8,17 +8,14 @@ from pathlib import Path
 import base64
 
 # Add project root to sys.path to allow importing nova_mcp
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.insert(0, project_root)
 
 # Import the needed functions
 try:
-    from nova_mcp import (
-        browser_session,
-        compress_log_file,
-        initialize_environment,
-        NOVA_ACT_AVAILABLE
-    )
+    from nova_mcp_server.tools import browser_session
+    from nova_mcp_server.utils import compress_log_file
+    from nova_mcp_server.config import initialize_environment, NOVA_ACT_AVAILABLE
     MCP_LOADED = True
 except ImportError as e:
     print(f"Failed to import nova_mcp components: {e}")
@@ -57,6 +54,9 @@ async def test_single_screenshot_compression(capsys):
         headless=True,
     )
     
+    # Check for errors in the response
+    assert "error" not in start, f"Session start failed: {start.get('error')}"
+    
     # Extract session_id, accounting for different response structures
     if isinstance(start, dict) and "result" in start:
         sid = start["result"]["session_id"]
@@ -71,6 +71,9 @@ async def test_single_screenshot_compression(capsys):
         session_id=sid,
         instruction="Observe the heading on this page and take a screenshot",
     )
+    
+    # Check for errors in the execute response
+    assert "error" not in exec_result, f"Execute action failed: {exec_result.get('error')}"
     
     # 3) create a test JSON file with screenshots if we can't get a real one
     # This ensures the test can work even if Nova Act output format changes

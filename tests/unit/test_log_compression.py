@@ -8,8 +8,8 @@ import base64
 from unittest.mock import patch, MagicMock, Mock
 from pathlib import Path
 
-# Import the mocks from test_nova_mcp.py
-from test_nova_mcp import MockTool, MockFastMCP, setup_module, teardown_module
+# Import the mocks from test_tool_registration.py instead of the deleted test_nova_mcp.py
+from tests.unit.test_tool_registration import MockTool, MockFastMCP, setup_module, teardown_module
 
 def create_test_log_file(with_screenshots=True, image_size=5000):
     """Create a test log file with optional screenshots for testing compression"""
@@ -68,7 +68,7 @@ def create_test_log_file(with_screenshots=True, image_size=5000):
 @pytest.mark.unit
 def test_compress_log_file():
     """Test the compress_log_file function"""
-    from nova_mcp import compress_log_file
+    from nova_mcp_server.utils import compress_log_file
     
     # Create a test log file with screenshots
     log_path = create_test_log_file(with_screenshots=True, image_size=5000)
@@ -114,6 +114,12 @@ def test_compress_log_file():
             or "/9j/" in preview_b64                  # Real JPEG data
             or "WFhY" in preview_b64                 # Base64 'XXX' in our test
         ), "Screenshot preview should be in expected format"
+
+    # NEW: Verify inline_screenshots field exists and is correct
+    assert "inline_screenshots" in result, "Expected 'inline_screenshots' in result"
+    assert result["inline_screenshots"], "Expected at least one inline screenshot"
+    first_img = result["inline_screenshots"][0]["data"]
+    assert first_img.startswith("data:image/jpeg;base64,"), "Inline screenshot should be base64 JPEG"
     
     # Clean up
     if os.path.exists(log_path):
@@ -131,7 +137,7 @@ def test_compress_log_file():
 @pytest.mark.unit
 def test_image_size_impact():
     """Test the impact of different image sizes on compression"""
-    from nova_mcp import compress_log_file
+    from nova_mcp_server.utils import compress_log_file
     
     # Test with different image sizes
     image_sizes = [1000, 5000, 10000]

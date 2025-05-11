@@ -193,7 +193,7 @@ async def mock_browser_session(
         )
 
 # We need to patch the entire module functions
-from nova_mcp import list_browser_sessions, view_html_log
+from nova_mcp_server.tools import list_browser_sessions, view_html_log
 
 # Mock the functions
 browser_session = mock_browser_session

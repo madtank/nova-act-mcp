@@ -7,6 +7,8 @@ __pycache__/
 CLAUDE.md
 testing/*
 config.json
+profiles/*
+!profiles/.gitkeep
 
 # C extensions
 *.so

@@ -47,6 +47,55 @@ inspect_result = await inspect_browser(session_id=session_id)
 }
 ```
 
+## Project Structure
+
+The project is organized with the following structure:
+
+```
+nova-act-mcp/
+├── .gitignore
+├── docs/                     # Documentation
+├── examples/                 # Demo scripts and usage examples
+│   ├── demo_inspect_browser.py
+│   ├── simple_inspect_demo.py
+│   ├── pizza_order_demo.py
+│   └── simple_form_demo.py
+├── nova_mcp.py               # Core module
+├── profiles/                 # Nova Act user profiles (runtime generated)
+├── pyproject.toml            # Project metadata and build config
+├── pytest.ini                # Pytest configuration
+├── README.md                 # This file
+├── tests/                    # Test suite
+│   ├── assets/               # Test assets
+│   ├── unit/                 # Fast tests, no external dependencies
+│   ├── mock/                 # Tests using mocked components
+│   ├── integration/          # Tests requiring API key and/or real browser
+│   └── functional/           # End-to-end workflow tests
+```
+
+## Running Tests
+
+The project uses pytest for testing. Tests are organized into different categories:
+
+```bash
+# Run unit tests (fast, no external dependencies)
+pytest tests/unit
+
+# Run mock tests (using mocked Nova Act / MCP components)
+pytest tests/mock
+
+# Run integration tests (requires API key and real browser)
+pytest tests/integration
+
+# Run functional tests (end-to-end workflow tests)
+pytest tests/functional
+
+# Run all tests
+pytest
+```
+
+Note: Integration and functional tests require a valid `NOVA_ACT_API_KEY` environment variable and will be skipped if not provided.
+
 ## What's New in v0.2.9
 - **Improved Screenshot Reliability**: More dependable screenshot delivery in responses
 - **Enhanced Log Path Discovery**: Smart, efficient path tracking for logs and screenshots

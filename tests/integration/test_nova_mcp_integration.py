@@ -7,18 +7,18 @@ import tempfile
 import gzip  # Add gzip import for decompression verification
 from pathlib import Path
 
-# Add project root to sys.path to allow importing nova_mcp
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+# Add project root to sys.path to allow importing nova_mcp_server
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.insert(0, project_root)
 
-# Attempt to import the real nova_mcp components
+# Attempt to import the real nova_mcp_server components
 try:
     # Import the specific tool functions directly
-    from nova_mcp import (
+    from nova_mcp_server import (
         list_browser_sessions,
-        browser_session,
+        browser_session as browser_session_func,  # Renamed to avoid conflict with fixture
         view_html_log,
-        compress_logs_tool,  # Add the compress_logs_tool function
+        compress_logs,    # renamed from compress_logs_tool
         mcp as mcp_instance, # Keep the instance for potential future use or context
         initialize_environment, # Import initialize_environment
         NOVA_ACT_AVAILABLE, # Check availability
@@ -26,13 +26,13 @@ try:
     )
     REAL_MCP_LOADED = True
 except ImportError as e:
-    print(f"Failed to import real nova_mcp components for integration tests: {e}")
+    print(f"Failed to import real nova_mcp_server components for integration tests: {e}")
     REAL_MCP_LOADED = False
     # Define dummy functions/variables if import fails to allow collection
     async def list_browser_sessions(): return {}
-    async def browser_session(**kwargs): return {}
+    async def browser_session_func(**kwargs): return {}  # Renamed dummy function
     async def view_html_log(**kwargs): return {}
-    async def compress_logs_tool(**kwargs): return {}  # Add dummy compress_logs function
+    async def compress_logs(**kwargs): return {}  # Updated name
     class MockMCP:
         pass
     mcp_instance = MockMCP()
@@ -117,7 +117,8 @@ async def test_nova_act_workflow():
     # 2. Start a new session
     print("\nTesting: control_browser (start)")
     start_params = {"action": "start", "url": "https://example.com", "headless": True}
-    start_result_dict = _as_dict(await nova_mcp.browser_session(**start_params))
+    start_result_dict = _as_dict(await browser_session_func(**start_params))
+    assert "error" not in start_result_dict, f"Session start failed: {start_result_dict.get('error')}"
     assert "session_id" in start_result_dict, f"'session_id' missing in start result: {start_result_dict}"
     assert start_result_dict.get("status") == "ready", f"Unexpected status in start result: {start_result_dict}"
     assert start_result_dict.get("success") is True, f"Start action did not report success: {start_result_dict}"
@@ -134,7 +135,7 @@ async def test_nova_act_workflow():
         "session_id": session_id,
         "instruction": "Click the link 'More information...'",
     }
-    execute_result_dict = _as_dict(await nova_mcp.browser_session(**execute_params))
+    execute_result_dict = _as_dict(await browser_session_func(**execute_params))
     assert execute_result_dict.get("session_id") == session_id, f"Session ID mismatch in execute result: {execute_result_dict}"
     assert execute_result_dict.get("success") is True, f"Execute action did not report success: {execute_result_dict}"
     assert "content" in execute_result_dict, f"'content' missing in execute result: {execute_result_dict}"
@@ -169,7 +170,7 @@ async def test_nova_act_workflow():
     # 5. End the session
     print("\nTesting: control_browser (end)")
     end_params = {"action": "end", "session_id": session_id}
-    end_result_dict = _as_dict(await nova_mcp.browser_session(**end_params))
+    end_result_dict = _as_dict(await browser_session_func(**end_params))
     assert end_result_dict.get("session_id") == session_id, f"Session ID mismatch in end result: {end_result_dict}"
     assert end_result_dict.get("status") == "ended", f"End action did not report ended status: {end_result_dict}"
     assert end_result_dict.get("success") is True, f"End action did not report success: {end_result_dict}"
@@ -208,7 +209,8 @@ async def test_nova_act_workflow_with_log_compression():
     # 1. Start a new session
     print("\nTesting: control_browser (start)")
     start_params = {"action": "start", "url": "https://example.com", "headless": True}
-    start_result_dict = _as_dict(await nova_mcp.browser_session(**start_params))
+    start_result_dict = _as_dict(await browser_session_func(**start_params))
+    assert "error" not in start_result_dict, f"Session start failed: {start_result_dict.get('error')}"
     assert "session_id" in start_result_dict, f"'session_id' missing in start result: {start_result_dict}"
     session_id = start_result_dict["session_id"]
     print(f"Started session: {session_id}")
@@ -236,7 +238,7 @@ async def test_nova_act_workflow_with_log_compression():
             "session_id": session_id,
             "instruction": instruction,
         }
-        execute_result_dict = _as_dict(await nova_mcp.browser_session(**execute_params))
+        execute_result_dict = _as_dict(await browser_session_func(**execute_params))
         assert execute_result_dict.get("success") is True, f"Instruction execution failed: {execute_result_dict}"
         # Wait between instructions
         await asyncio.sleep(2)
@@ -303,7 +305,7 @@ async def test_nova_act_workflow_with_log_compression():
         "extract_screenshots": True,
         "compression_level": 9
     }
-    compression_result = await compress_logs_tool(**compress_params)
+    compression_result = await compress_logs(**compress_params)
     
     # Verify compression was successful
     assert "error" not in compression_result, f"Compression returned an error: {compression_result.get('error')}"
@@ -348,7 +350,7 @@ async def test_nova_act_workflow_with_log_compression():
     # 8. End the session
     print("\nTesting: control_browser (end)")
     end_params = {"action": "end", "session_id": session_id}
-    end_result_dict = _as_dict(await nova_mcp.browser_session(**end_params))
+    end_result_dict = _as_dict(await browser_session_func(**end_params))
     assert end_result_dict.get("status") == "ended", f"End action did not report ended status: {end_result_dict}"
     print(f"Session ended: {session_id}")
     
@@ -392,12 +394,12 @@ import uuid
 from pathlib import Path
 import pytest_asyncio  # Use pytest_asyncio instead of regular pytest for async fixtures
 
-# Add project root to sys.path to allow importing nova_mcp
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+# Add project root to sys.path to allow importing nova_mcp_server
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.insert(0, project_root)
 
 # Import the module under test
-import nova_mcp
+from nova_mcp_server import nova_mcp_server
 
 # Configuration
 TEST_SITE = "https://the-internet.herokuapp.com"
@@ -422,7 +424,7 @@ async def browser_session():
         "url": TEST_SITE,
         "headless": True
     }
-    response = await nova_mcp.browser_session(**start_params)
+    response = await nova_mcp_server.browser_session(**start_params)
     
     # Extract session ID from result
     if isinstance(response, dict) and "result" in response:
@@ -438,7 +440,7 @@ async def browser_session():
     
     # End the session when the test is done
     end_params = {"action": "end", "session_id": session_id}
-    await nova_mcp.browser_session(**end_params)
+    await nova_mcp_server.browser_session(**end_params)
 
 # Helper function to extract content from responses
 def get_response_text(response):
@@ -466,7 +468,9 @@ async def test_session_basics():
     """Test opening and closing a browser session."""
     # Start a new session
     start_params = {"action": "start", "url": "https://example.com", "headless": True}
-    start_result = await nova_mcp.browser_session(**start_params)
+    start_result = await nova_mcp_server.browser_session(**start_params)
+    
+    assert "error" not in start_result, f"Session start failed: {start_result.get('error')}"
     
     if isinstance(start_result, dict) and "result" in start_result:
         result = start_result["result"]
@@ -482,11 +486,11 @@ async def test_session_basics():
         "session_id": session_id,
         "instruction": "Get the page title"
     }
-    execute_result = await nova_mcp.browser_session(**execute_params)
+    execute_result = await nova_mcp_server.browser_session(**execute_params)
     
     # End the session
     end_params = {"action": "end", "session_id": session_id}
-    end_result = await nova_mcp.browser_session(**end_params)
+    end_result = await nova_mcp_server.browser_session(**end_params)
 
 # Tests for the Basic NL Suite
 @pytest.mark.skipif(skip_integration_tests, reason=skip_reason)
@@ -498,14 +502,14 @@ class TestBasicNLSuite:
     async def test_checkboxes(self, browser_session):
         """Test checkbox interactions"""
         # Navigate to the homepage first
-        await nova_mcp.browser_session(
+        await nova_mcp_server.browser_session(
             action="execute",
             session_id=browser_session,
             instruction="Navigate to https://the-internet.herokuapp.com/"
         )
         
         # Click the Checkboxes link
-        response = await nova_mcp.browser_session(
+        response = await nova_mcp_server.browser_session(
             action="execute",
             session_id=browser_session,
             instruction="Click the Checkboxes link"
@@ -515,7 +519,7 @@ class TestBasicNLSuite:
         assert "success" in response_text.lower() or "clicked" in response_text.lower(), f"Failed to click link: {response_text}"
         
         # Check the first checkbox
-        response = await nova_mcp.browser_session(
+        response = await nova_mcp_server.browser_session(
             action="execute",
             session_id=browser_session,
             instruction="Check the first checkbox"
@@ -524,7 +528,7 @@ class TestBasicNLSuite:
         assert "success" in response_text.lower() or "checked" in response_text.lower(), f"Failed to check checkbox: {response_text}"
         
         # Uncheck the second checkbox
-        response = await nova_mcp.browser_session(
+        response = await nova_mcp_server.browser_session(
             action="execute",
             session_id=browser_session,
             instruction="Uncheck the second checkbox"
@@ -536,14 +540,14 @@ class TestBasicNLSuite:
     async def test_dropdown(self, browser_session):
         """Test dropdown selection"""
         # Navigate back to the homepage
-        await nova_mcp.browser_session(
+        await nova_mcp_server.browser_session(
             action="execute",
             session_id=browser_session,
             instruction="Navigate to https://the-internet.herokuapp.com/"
         )
         
         # Click the Dropdown link
-        response = await nova_mcp.browser_session(
+        response = await nova_mcp_server.browser_session(
             action="execute",
             session_id=browser_session,
             instruction="Click the Dropdown link"
@@ -552,7 +556,7 @@ class TestBasicNLSuite:
         assert "success" in response_text.lower() or "clicked" in response_text.lower(), f"Failed to click dropdown link: {response_text}"
         
         # Select Option 1 from dropdown
-        response = await nova_mcp.browser_session(
+        response = await nova_mcp_server.browser_session(
             action="execute",
             session_id=browser_session,
             instruction="Select Option 1 from the dropdown"
@@ -570,14 +574,14 @@ class TestFormNLSuite:
     async def test_login_form(self, browser_session):
         """Test the login form and authentication"""
         # Navigate to the homepage first to ensure clean state
-        await nova_mcp.browser_session(
+        await nova_mcp_server.browser_session(
             action="execute",
             session_id=browser_session,
             instruction="Navigate to https://the-internet.herokuapp.com/"
         )
         
         # Navigate to the Login page
-        response = await nova_mcp.browser_session(
+        response = await nova_mcp_server.browser_session(
             action="execute",
             session_id=browser_session,
             instruction="Click on Form Authentication"
@@ -586,7 +590,7 @@ class TestFormNLSuite:
         assert "success" in response_text.lower() or "clicked" in response_text.lower(), f"Failed to click login link: {response_text}"
         
         # Enter username and password
-        response = await nova_mcp.browser_session(
+        response = await nova_mcp_server.browser_session(
             action="execute",
             session_id=browser_session,
             username="tomsmith",

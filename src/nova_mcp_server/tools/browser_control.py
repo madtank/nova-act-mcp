@@ -1,0 +1,399 @@
+"""
+Browser control tools for the Nova Act MCP Server.
+
+This module provides functionality for controlling web browsers,
+including session management, page navigation, interaction, and inspection.
+This is the main dispatcher that calls the appropriate action modules.
+"""
+
+import asyncio
+import re
+import threading
+from typing import Dict, Any, Optional, Union, Literal
+from concurrent.futures import ThreadPoolExecutor
+
+from ..config import (
+    initialize_environment,
+    DEFAULT_TIMEOUT,
+    MAX_RETRY_ATTEMPTS,
+    DEFAULT_PROFILE_IDENTITY,
+    PROGRESS_INTERVAL,
+    get_nova_act_api_key,
+    NOVA_ACT_AVAILABLE,
+    log,
+    log_debug,
+)
+
+from ..session_manager import (
+    active_sessions,
+    session_lock,
+)
+
+# Import actions from their respective modules
+from .actions_start import initialize_browser_session
+from .actions_execute import execute_session_action
+from .actions_end import end_session_action
+from .actions_inspect import inspect_browser_action
+
+# Import FastMCP for tool decoration (if used in this file)
+from .. import mcp
+
+# Store thread-specific executors to maintain context for each session
+# Key: session_id, Value: ThreadPoolExecutor with max_workers=1
+session_executors = {}
+session_executors_lock = threading.Lock()
+
+
+def get_session_executor(session_id: str) -> ThreadPoolExecutor:
+    """
+    Get or create a dedicated ThreadPoolExecutor for a session.
+    This ensures the same thread is used for all operations on a session.
+    
+    Args:
+        session_id: The session ID
+        
+    Returns:
+        ThreadPoolExecutor: A dedicated executor for the session
+    """
+    with session_executors_lock:
+        if session_id not in session_executors:
+            log_debug(f"Creating new executor for session {session_id}")
+            session_executors[session_id] = ThreadPoolExecutor(max_workers=1)
+        return session_executors[session_id]
+
+
+def cleanup_session_executor(session_id: str):
+    """
+    Clean up the executor for a session when it's no longer needed.
+    
+    Args:
+        session_id: The session ID
+    """
+    with session_executors_lock:
+        if session_id in session_executors:
+            log_debug(f"Shutting down executor for session {session_id}")
+            executor = session_executors.pop(session_id)
+            executor.shutdown(wait=False)
+
+
+@mcp.tool(
+    name="browser_session",
+    description="Manage and interact with a web browser session via Nova Act agent"
+)
+async def browser_session(
+    task: Optional[str] = None,
+    instructions: Optional[str] = None,
+    session_id: Optional[str] = None,
+    identity: str = DEFAULT_PROFILE_IDENTITY,
+    timeout: int = DEFAULT_TIMEOUT,
+    headless: bool = True,
+    retry_attempts: int = MAX_RETRY_ATTEMPTS,
+    quiet: bool = False,
+    close_after: bool = False,
+    # Legacy compatibility parameters
+    action: Optional[str] = None,
+    url: Optional[str] = None,
+    instruction: Optional[str] = None,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    **kwargs
+) -> Dict[str, Any]:
+    """
+    Manage and interact with a web browser session via Nova Act.
+    
+    Args:
+        task: The task to perform with the browser
+        instructions: Additional instructions for performing the task
+        session_id: An existing session ID to use
+        identity: The profile identity to use
+        timeout: Maximum time to wait for task completion in seconds
+        headless: Whether to run the browser in headless mode
+        retry_attempts: Number of retry attempts for the task
+        quiet: Don't log extra progress info if True
+        close_after: Close the browser session after task completion if True
+        
+        # Legacy compatibility parameters:
+        action: (Legacy) Action to perform ("start", "execute", "end")
+        url: (Legacy) URL to open when starting a browser session
+        instruction: (Legacy) Single instruction to execute
+        username: (Legacy) Username for login forms
+        password: (Legacy) Password for login forms
+        
+    Returns:
+        dict: A dictionary containing results of browser operations
+    """
+    initialize_environment()
+    loop = asyncio.get_event_loop()
+    
+    # Check if NovaAct is available
+    if not NOVA_ACT_AVAILABLE:
+        return {
+            "error": "Nova Act SDK is not installed. Please install it with: pip install nova-act",
+            "error_code": "NOVA_ACT_NOT_AVAILABLE",
+        }
+    
+    # Get the API key
+    api_key = get_nova_act_api_key()
+    if not api_key:
+        return {
+            "error": "Nova Act API key not found. Please set it in your MCP config or as an environment variable.",
+            "error_code": "MISSING_API_KEY",
+        }
+    
+    # Create an internal function to handle start action
+    async def _handle_start_action(url_to_use, identity_to_use, headless_mode, session_id_to_use=None):
+        # Generate temporary session_id just for creating the executor
+        # The actual session_id will be generated by initialize_browser_session
+        temp_session_id = session_id_to_use or f"temp-{threading.get_ident()}"
+        executor = get_session_executor(temp_session_id)
+        
+        # Add debug logging before initializing the browser session
+        log_debug(f"DEBUG: Before initializing browser session with URL: '{url_to_use}', headless: {headless_mode}")
+        
+        # Run initialize_browser_session in the session's dedicated executor
+        start_result = await loop.run_in_executor(
+            executor,
+            lambda: initialize_browser_session(
+                url=url_to_use,
+                identity=identity_to_use,
+                headless=headless_mode,
+                session_id=session_id_to_use
+            )
+        )
+        
+        # Add debug logging after browser session initialization
+        log_debug(f"DEBUG: After initializing browser session, result status: {start_result.get('status', 'unknown')}")
+        if "error" in start_result:
+            log_debug(f"DEBUG: Error in start_result: {start_result['error']}")
+        
+        # If the session_id changed (auto-generated), update the executor mapping
+        if temp_session_id.startswith("temp-") and "session_id" in start_result:
+            new_session_id = start_result["session_id"]
+            if new_session_id != temp_session_id:
+                with session_executors_lock:
+                    session_executors[new_session_id] = executor
+                    if temp_session_id in session_executors:
+                        del session_executors[temp_session_id]
+                log_debug(f"Updated executor mapping from {temp_session_id} to {new_session_id}")
+        
+        return start_result
+    
+    # Create an internal function to handle end action
+    async def _handle_end_action(session_id_to_end):
+        if not session_id_to_end:
+            return {
+                "error": "Session ID is required for end action",
+                "error_code": "MISSING_PARAMETER",
+            }
+        
+        executor = get_session_executor(session_id_to_end)
+        
+        # Run end_session_action in the session's dedicated executor
+        end_result = await loop.run_in_executor(
+            executor,
+            lambda: end_session_action(session_id=session_id_to_end)
+        )
+        
+        # Clean up the executor
+        cleanup_session_executor(session_id_to_end)
+        
+        return end_result
+    
+    # Handle legacy action parameter for backward compatibility
+    if action:
+        if action == "start":
+            # Legacy start action - URL is required
+            if not url:
+                return {
+                    "error": "URL is required for start action.",
+                    "error_code": "MISSING_PARAMETER",
+                }
+            
+            return await _handle_start_action(url, identity, headless, session_id)
+        
+        elif action == "execute":
+            # Legacy execute action - use instruction or task
+            exec_instruction = instruction or task or ""
+            if username and password:
+                # Special case for login forms
+                exec_instruction = f"Log in with username '{username}' and password '{password}'"
+            
+            if not session_id:
+                return {
+                    "error": "Session ID is required for execute action",
+                    "error_code": "MISSING_PARAMETER",
+                }
+            
+            executor = get_session_executor(session_id)
+            
+            # Store the executor in the session data for the execute action to use
+            with session_lock:
+                if session_id in active_sessions:
+                    active_sessions[session_id]["executor"] = executor
+            
+            return await execute_session_action(
+                session_id=session_id,
+                task=exec_instruction,
+                instructions=instructions,
+                timeout=timeout,
+                retry_attempts=retry_attempts,
+                quiet=quiet
+            )
+        
+        elif action == "end":
+            return await _handle_end_action(session_id)
+        
+        else:
+            return {
+                "error": f"Unknown action: {action}",
+                "error_code": "INVALID_ACTION",
+            }
+    
+    # Regular operation (non-legacy mode)
+    # Determine the action based on the presence of parameters
+    if not session_id and task:
+        # No session_id but has a task - initialize and then execute
+        # If no explicit URL provided, try to extract from task or use a default
+        if not url:
+            extracted_url_match = re.search(r"(?:navigate to|open|go to)\s+(https?://[^\s]+)", task, re.IGNORECASE)
+            task_url = extracted_url_match.group(1) if extracted_url_match else "about:blank"
+            actual_url_for_start = task_url
+            log(f"Implicit start for task, using URL extracted from task: {actual_url_for_start}")
+        else:
+            actual_url_for_start = url
+        
+        # Start the browser session
+        init_result = await _handle_start_action(actual_url_for_start, identity, headless)
+        
+        # Check if initialization was successful
+        if "error" in init_result:
+            return init_result
+        
+        # Get the session ID from the initialization result
+        new_session_id = init_result.get("session_id")
+        
+        # Get the executor for this session
+        executor = get_session_executor(new_session_id)
+        
+        # Store the executor in the session data for the execute action to use
+        with session_lock:
+            if new_session_id in active_sessions:
+                active_sessions[new_session_id]["executor"] = executor
+        
+        # Now execute the task with the new session
+        exec_result = await execute_session_action(
+            session_id=new_session_id,
+            task=task,
+            instructions=instructions,
+            timeout=timeout,
+            retry_attempts=retry_attempts,
+            quiet=quiet
+        )
+        
+        # Clean up if requested
+        if close_after:
+            await _handle_end_action(new_session_id)
+        
+        return exec_result
+    
+    elif session_id and not task:
+        # Has session_id but no task - closing the session
+        return await _handle_end_action(session_id)
+    
+    elif session_id and task:
+        # Has both session_id and task - execute in existing session
+        executor = get_session_executor(session_id)
+        
+        # Store the executor in the session data for the execute action to use
+        with session_lock:
+            if session_id in active_sessions:
+                active_sessions[session_id]["executor"] = executor
+        
+        exec_result = await execute_session_action(
+            session_id=session_id,
+            task=task,
+            instructions=instructions,
+            timeout=timeout,
+            retry_attempts=retry_attempts,
+            quiet=quiet
+        )
+        
+        # Clean up if requested
+        if close_after:
+            await _handle_end_action(session_id)
+        
+        return exec_result
+    
+    else:
+        # No session_id and no task - invalid parameters
+        return {
+            "error": "Missing required parameters: Either task or session_id must be provided",
+            "error_code": "MISSING_PARAMETER",
+        }
+
+
+@mcp.tool(
+    name="inspect_browser",
+    description="Get screenshots and current state of browser sessions"
+)
+async def inspect_browser(
+    session_id: Optional[str] = None # session_id is now truly optional at this level
+) -> Dict[str, Any]:
+    """
+    Get screenshots and current state of browser sessions.
+    
+    Args:
+        session_id: The session ID to inspect. If None, will attempt to inspect
+                    the most recently active or default session if applicable (currently errors).
+        
+    Returns:
+        dict: A dictionary containing browser state information
+    """
+    initialize_environment()
+    
+    if not NOVA_ACT_AVAILABLE:
+        return {
+            "error": "Nova Act SDK is not installed. Please install it with: pip install nova-act",
+            "error_code": "NOVA_ACT_NOT_AVAILABLE",
+        }
+    
+    api_key = get_nova_act_api_key()
+    if not api_key:
+        return {
+            "error": "Nova Act API key not found. Please set it in your MCP config or as an environment variable.",
+            "error_code": "MISSING_API_KEY",
+        }
+
+    if not session_id:
+        log_error("inspect_browser called without a session_id, which is currently required.")
+        return {
+            "error": "session_id is currently required for inspect_browser",
+            "error_code": "MISSING_PARAMETER",
+        }
+
+    try:
+        executor = get_session_executor(session_id)
+    except KeyError:
+        log_error(f"No active executor found for session_id: {session_id}. Session might not be started or already ended.")
+        return {
+            "error": f"No active executor for session_id: {session_id}. Session may not exist or is not active.",
+            "error_code": "SESSION_EXECUTOR_NOT_FOUND",
+        }
+        
+    import traceback  # Ensure traceback is imported
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(
+            executor,
+            inspect_browser_action,
+            session_id
+        )
+        return result
+    except Exception as e:
+        log_error(f"Exception during inspect_browser execution for session {session_id}: {e}")
+        return {
+            "session_id": session_id,
+            "error": f"An unexpected error occurred during inspection: {str(e)}",
+            "error_details": traceback.format_exc(),
+            "success": False,
+        }
