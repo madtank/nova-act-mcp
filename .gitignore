@@ -12,7 +12,8 @@ profiles/*
 !profiles/.gitkeep
 diagnostic_output.log
 test_output.log
-
+.github/copilot-instructions.md
+archive/
 # C extensions
 *.so
 

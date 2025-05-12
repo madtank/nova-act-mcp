@@ -1,0 +1,23 @@
+flowchart TD
+    A["AI Agent (e.g., Claude)"] -- MCP Request (JSON) --> B["MCP Client"];
+    B -- JSON-RPC --> C{"nova-act-mcp-server"};
+    C -- Selects Tool --> D["e.g., browser_session tool"];
+    D -- Uses --> E["src/nova_mcp_server/session_manager.py"];
+    D -- Calls --> F["src/nova_mcp_server/tools/actions_*.py modules"];
+    F -- Interacts with --> G["NovaAct SDK Instance"];
+    G -- Controls --> H["Playwright"];
+    H -- Drives --> I["Web Browser"];
+    I -- Returns Page State --> H;
+    H -- SDK Processes --> G;
+    G -- Returns Result --> F;
+    F -- Formats Result --> D;
+    D -- MCP Response (JSON) --> C;
+    C -- JSON-RPC --> B;
+    B -- MCP Response --> A;
+
+    subgraph nova-act-mcp-server
+        C
+        D
+        E
+        F
+    end
