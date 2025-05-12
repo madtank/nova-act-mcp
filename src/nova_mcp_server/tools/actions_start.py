@@ -178,6 +178,7 @@ def initialize_browser_session(
         # Use _normalize_logs_dir function to reliably get the logs directory path
         # Created by the NovaAct SDK after nova.start() has been called
         logs_dir = _normalize_logs_dir(nova, sdk_session_id_override=nova_session_id)
+        log_info(f"[{session_id}] Retrieved logs_dir using _normalize_logs_dir: {logs_dir}")
 
         if logs_dir:
             log_info(f"[{session_id}] Successfully retrieved logs_dir: {logs_dir}")
@@ -191,7 +192,7 @@ def initialize_browser_session(
                 "status": "ready",
                 "url": url,
                 "nova_session_id": nova_session_id,
-                "logs_dir": logs_dir,
+                "logs_dir": logs_dir,  # Store the logs_dir even if it's None
                 "last_updated": time.time(),
             }
 

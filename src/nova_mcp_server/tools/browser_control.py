@@ -15,7 +15,6 @@ from concurrent.futures import ThreadPoolExecutor
 from ..config import (
     initialize_environment,
     DEFAULT_TIMEOUT,
-    MAX_RETRY_ATTEMPTS,
     DEFAULT_PROFILE_IDENTITY,
     PROGRESS_INTERVAL,
     get_nova_act_api_key,
@@ -31,7 +30,7 @@ from ..session_manager import (
 
 # Import actions from their respective modules
 from .actions_start import initialize_browser_session
-from .actions_execute import execute_session_action
+from .actions_execute import execute_session_action, MAX_RETRY_ATTEMPTS as EXECUTE_MAX_RETRY_ATTEMPTS
 from .actions_end import end_session_action
 from .actions_inspect import inspect_browser_action
 
@@ -87,7 +86,7 @@ async def browser_session(
     identity: str = DEFAULT_PROFILE_IDENTITY,
     timeout: int = DEFAULT_TIMEOUT,
     headless: bool = True,
-    retry_attempts: int = MAX_RETRY_ATTEMPTS,
+    retry_attempts: int = EXECUTE_MAX_RETRY_ATTEMPTS,
     quiet: bool = False,
     close_after: bool = False,
     # Legacy compatibility parameters

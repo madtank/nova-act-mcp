@@ -72,7 +72,7 @@ with patch.dict('sys.modules', {
     
     # Import with NOVA_ACT_AVAILABLE set to True
     with patch('builtins.__import__', side_effect=__import__):
-        import nova_mcp
+        import nova_mcp_server as nova_mcp
         nova_mcp.NOVA_ACT_AVAILABLE = True
         nova_mcp.NOVA_ACT_API_KEY = "mock-api-key"
         nova_mcp.mcp = mock_mcp
