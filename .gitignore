@@ -14,6 +14,9 @@ diagnostic_output.log
 test_output.log
 .github/copilot-instructions.md
 archive/
+mcp-config-local.json
+PROJECT_GUIDE.md
+
 # C extensions
 *.so
 

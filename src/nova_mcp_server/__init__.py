@@ -16,7 +16,9 @@ mcp = FastMCP("nova-browser")
 # The tool functions themselves are decorated with @mcp.tool in their respective files
 from .tools import (
     list_browser_sessions,
-    browser_session,  # control_browser was renamed to browser_session
+    start_session,
+    execute_instruction,
+    end_session,
     view_html_log,
     compress_logs,
     view_compressed_log,

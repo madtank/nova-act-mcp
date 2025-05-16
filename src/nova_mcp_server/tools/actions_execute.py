@@ -366,17 +366,22 @@ def run_entire_execution_in_thread(
         task_success = True
     
     # Get the current URL from the browser
-    if nova:
+    if nova and hasattr(nova, 'page') and nova.page: # Ensure nova and nova.page exist
         try:
-            urls = nova.get_browser_urls()
-            if urls:
-                current_url = urls[0]
-                # If URL changed from example.com, it's likely the navigation was successful
-                if current_url != "https://example.com/" and not task_success:
-                    log_debug(f"Setting success=True based on URL change to {current_url}")
+            current_url = nova.page.url
+            if current_url:
+                log_debug(f"Retrieved current URL after execution: {current_url}")
+                # If we have a meaningful URL and the task was considered a failure but we have steps,
+                # we might want to consider it successful based on URL evidence
+                if current_url != "about:blank" and not task_success and step_results:
+                    log_info(f"Setting success=True based on URL change to {current_url}")
                     task_success = True
+            else:
+                log_warning("nova.page.url returned empty URL.")
         except Exception as e:
-            log(f"Error getting current URL: {e}")
+            log_error(f"Error retrieving current URL: {str(e)}")
+    else:
+        log_warning("Cannot retrieve URL: Nova instance or page not available.")
     
     # Return a consolidated result object
     log_debug(f"Final task success determination: {task_success}")

@@ -16,7 +16,7 @@ from ..config import log, log_error, initialize_environment
 
 @mcp.tool(
     name="fetch_file",
-    description="Fetch a file from the server and return its content"
+    description="Retrieves the contents of a file from the server, with optional base64 encoding. Primarily used to access log files, screenshots, and other assets generated during browser automation. Set encode_base64=True for binary files like images. Has a configurable size limit (default 10MB) to prevent excessive token usage with large files."
 )
 async def fetch_file(
     file_path: str,
@@ -26,13 +26,31 @@ async def fetch_file(
     """
     Fetch a file from the server and optionally encode it as base64.
     
+    This tool retrieves the contents of a file from the server's filesystem. It's
+    commonly used to access log files, screenshots, and other assets generated during
+    browser automation sessions. Binary files (like images) should be retrieved with
+    encode_base64=True to ensure proper handling.
+    
     Args:
-        file_path: Path to the file to fetch
-        encode_base64: Whether to encode the file as base64
-        max_size: Maximum file size in bytes
+        file_path: The absolute path to the file to fetch. This path should typically
+                  come from the output of other tools (like inspect_browser or execute_instruction)
+                  that generate or reference files on the server.
+        encode_base64: Whether to encode the file content as base64. Set to True for binary
+                      files like images, PDFs, etc. Set to False for text files.
+        max_size: Maximum file size in bytes that can be fetched. Defaults to 10MB.
+                 This limit exists to prevent excessive token usage with large files.
         
     Returns:
-        dict: A dictionary containing file content and metadata
+        A dictionary containing:
+        - file_path (str): The path of the requested file
+        - file_name (str): The name of the file (without the path)
+        - file_size (int): Size of the file in bytes
+        - content_type (str): Detected MIME type of the file
+        - content (str): The file content as text or base64-encoded string
+        - encoding (str): The encoding used ("utf-8" or "base64")
+        - is_binary (bool): Whether the file was detected as binary
+        - success (bool): True if the file was successfully retrieved
+        - error (Optional[Dict]): Error information if the file could not be retrieved
     """
     initialize_environment()
     

@@ -35,9 +35,9 @@ except ImportError:
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] - %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
     handlers=[
-        logging.StreamHandler(sys.stdout),
+        logging.StreamHandler(sys.stderr),
     ],
 )
 
@@ -178,6 +178,14 @@ def log(message: str, level: str = "INFO") -> None:
         message: The message to log
         level: The logging level (INFO, DEBUG, ERROR, WARNING)
     """
+    # Always use stderr for all logging output
+    stream = sys.stderr
+    
+    # Print directly to the appropriate stream
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"{timestamp} [{level}] - {message}", file=stream, flush=True)
+    
+    # Also log to the logger
     level_upper = level.upper()
     
     if level_upper == "DEBUG":

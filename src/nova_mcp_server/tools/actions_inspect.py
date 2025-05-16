@@ -31,12 +31,14 @@ from ..session_manager import (
 from ..utils import _normalize_logs_dir
 
 
-def inspect_browser_action(session_id: str) -> Dict[str, Any]:
+def inspect_browser_action(session_id: str, include_screenshot: bool = False) -> Dict[str, Any]:
     """
     Get screenshots and current state of browser sessions.
 
     Args:
         session_id: The session ID to inspect
+        include_screenshot: If True, attempts to capture and include a base64 JPEG screenshot.
+                           Defaults to False to save LLM context space.
 
     Returns:
         dict: A dictionary containing browser state information
@@ -55,12 +57,17 @@ def inspect_browser_action(session_id: str) -> Dict[str, Any]:
             "error_code": "NOVA_ACT_NOT_AVAILABLE",
         }
 
-    return _inspect_browser(session_id=session_id, inline_image_quality=INLINE_IMAGE_QUALITY)
+    return _inspect_browser(session_id=session_id, include_screenshot_flag=include_screenshot, inline_image_quality=INLINE_IMAGE_QUALITY)
 
-def _inspect_browser(session_id: str, inline_image_quality: int = 60) -> dict:
+def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inline_image_quality: int = 60) -> dict:
     """
     Inspect the current browser session and return page info and screenshot.
     This is run in a worker thread to avoid blocking the main event loop.
+
+    Args:
+        session_id: ID of the browser session to inspect
+        include_screenshot_flag: Whether to include a screenshot in the response
+        inline_image_quality: JPEG quality (1-100) for screenshot if included
     """
     from .actions_start import active_sessions
     from ..config import log_debug, log_error, log_warning, log_info, MAX_INLINE_IMAGE_BYTES, INLINE_IMAGE_QUALITY
@@ -125,22 +132,27 @@ def _inspect_browser(session_id: str, inline_image_quality: int = 60) -> dict:
         browser_state["title_error"] = str(e_title_direct)
         agent_thinking_messages.append({"type": "system_error", "content": error_msg, "source": "inspect_browser"})
 
-    # Screenshot logic: try direct, fallback to nova.act()
-    try:
-        screenshot_data_bytes = nova.page.screenshot(type="jpeg", quality=inline_image_quality)
-        log_debug(f"[{session_id}] Screenshot captured via nova.page, size: {len(screenshot_data_bytes) if screenshot_data_bytes else 0} bytes")
-        if screenshot_data_bytes:
-            if len(screenshot_data_bytes) <= MAX_INLINE_IMAGE_BYTES:
-                inline_screenshot = "data:image/jpeg;base64," + base64.b64encode(screenshot_data_bytes).decode()
-                log_debug(f"[{session_id}] Screenshot prepared for inline ({len(screenshot_data_bytes)} bytes).")
-            else:
-                screenshot_status_message = f"Screenshot captured but too large for inline response ({len(screenshot_data_bytes)}B > {MAX_INLINE_IMAGE_BYTES}B limit)."
-                log_debug(f"[{session_id}] {screenshot_status_message}")
-                agent_thinking_messages.append({"type": "system_warning", "content": screenshot_status_message, "source": "inspect_browser"})
-    except Exception as e_screenshot:
-        screenshot_status_message = f"Error capturing screenshot via nova.page.screenshot(): {str(e_screenshot)}"
-        log_error(f"[{session_id}] Screenshot capture failed: {screenshot_status_message} \n{traceback.format_exc()}")
-        agent_thinking_messages.append({"type": "system_error", "content": screenshot_status_message, "source": "inspect_browser"})
+    # Screenshot logic: only try if include_screenshot_flag is True
+    if include_screenshot_flag:
+        try:
+            screenshot_data_bytes = nova.page.screenshot(type="jpeg", quality=inline_image_quality)
+            log_debug(f"[{session_id}] Screenshot captured via nova.page, size: {len(screenshot_data_bytes) if screenshot_data_bytes else 0} bytes")
+            if screenshot_data_bytes:
+                if len(screenshot_data_bytes) <= MAX_INLINE_IMAGE_BYTES:
+                    inline_screenshot = "data:image/jpeg;base64," + base64.b64encode(screenshot_data_bytes).decode()
+                    log_debug(f"[{session_id}] Screenshot prepared for inline ({len(screenshot_data_bytes)} bytes).")
+                else:
+                    screenshot_status_message = f"Screenshot captured but too large for inline response ({len(screenshot_data_bytes)}B > {MAX_INLINE_IMAGE_BYTES}B limit)."
+                    log_debug(f"[{session_id}] {screenshot_status_message}")
+                    agent_thinking_messages.append({"type": "system_warning", "content": screenshot_status_message, "source": "inspect_browser"})
+        except Exception as e_screenshot:
+            screenshot_status_message = f"Error capturing screenshot via nova.page.screenshot(): {str(e_screenshot)}"
+            log_error(f"[{session_id}] Screenshot capture failed: {screenshot_status_message} \n{traceback.format_exc()}")
+            agent_thinking_messages.append({"type": "system_error", "content": screenshot_status_message, "source": "inspect_browser"})
+    else:
+        log_debug(f"[{session_id}] Skipping screenshot capture as include_screenshot_flag is False")
+        screenshot_status_message = "Screenshot capture skipped (include_screenshot=False)"
+        agent_thinking_messages.append({"type": "system_info", "content": screenshot_status_message, "source": "inspect_browser"})
 
     # Logs directory
     logs_dir_from_session = active_sessions.get(session_id, {}).get("logs_dir")
@@ -167,14 +179,17 @@ def _inspect_browser(session_id: str, inline_image_quality: int = 60) -> dict:
         ]
 
     content_for_response = [{"type": "text", "text": f"Current URL: {current_url}\nPage Title: {page_title}"}]
-    if inline_screenshot:
+    
+    # Only add screenshot to content if include_screenshot_flag is True and we have a valid screenshot
+    if include_screenshot_flag and inline_screenshot:
         content_for_response.insert(0, {
             "type": "image_base64",
             "data": inline_screenshot,
             "caption": "Current viewport"
         })
-
-    if screenshot_status_message and not any(msg['content'] == screenshot_status_message for msg in agent_thinking_messages):
+    
+    # Add screenshot status message to agent_thinking if we have one and it's not already there
+    if screenshot_status_message and not any(msg.get('content') == screenshot_status_message for msg in agent_thinking_messages):
         agent_thinking_messages.append({
             "type": "system_info",
             "content": screenshot_status_message,
