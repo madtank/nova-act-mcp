@@ -54,8 +54,8 @@ async def start_session(
     except anyio.get_cancelled_exc_class() as e_cancel:
         log_warning(f"start_session tool cancelled by client: {e_cancel}")
         return {"error": "Session start cancelled by client", "success": False, "status": "cancelled"}
-    except RuntimeError as e_exec: # Changed from Exception to RuntimeError
-        log_error(f"RuntimeError from anyio.to_thread.run_sync for start_session: {str(e_exec)}\n{traceback.format_exc()}") # Removed exc_info, added traceback
+    except Exception as e_exec: # Catch general Exception
+        log_error(f"Exception from anyio.to_thread.run_sync for start_session: {str(e_exec)}\n{traceback.format_exc()}")
         return {"error": f"Failed to initialize session: {str(e_exec)}", "success": False, "status": "error", "error_details": traceback.format_exc()}
     return start_result
 
@@ -90,8 +90,8 @@ async def execute_instruction(
     except anyio.get_cancelled_exc_class() as e_cancel:
         log_warning(f"execute_instruction for session {session_id} cancelled: {e_cancel}")
         return {"session_id": session_id, "error": "Execution cancelled", "success": False, "status": "cancelled"}
-    except RuntimeError as e_exec: # Changed from Exception to RuntimeError
-        log_error(f"RuntimeError from anyio.to_thread.run_sync for execute_instruction (session {session_id}): {str(e_exec)}\n{traceback.format_exc()}") # Removed exc_info, added traceback
+    except Exception as e_exec: # Catch general Exception
+        log_error(f"Exception from anyio.to_thread.run_sync for execute_instruction (session {session_id}): {str(e_exec)}\n{traceback.format_exc()}")
         return {"session_id": session_id, "error": f"Failed to execute instruction: {str(e_exec)}", "success": False, "status": "error", "error_details": traceback.format_exc()}
     return result
 
@@ -120,8 +120,8 @@ async def inspect_browser( # Removed unused ctx parameter
     except anyio.get_cancelled_exc_class() as e_cancel:
         log_warning(f"inspect_browser for session {session_id} cancelled: {e_cancel}")
         return {"session_id": session_id, "error": "Inspection cancelled", "success": False, "status": "cancelled"}
-    except RuntimeError as e_exec: # Changed from Exception to RuntimeError
-        log_error(f"RuntimeError from anyio.to_thread.run_sync for inspect_browser (session {session_id}): {str(e_exec)}\n{traceback.format_exc()}") # Removed exc_info, added traceback
+    except Exception as e_exec: # Catch general Exception
+        log_error(f"Exception from anyio.to_thread.run_sync for inspect_browser (session {session_id}): {str(e_exec)}\n{traceback.format_exc()}")
         return {"session_id": session_id, "error": f"Failed to inspect browser: {str(e_exec)}", "success": False, "status": "error", "error_details": traceback.format_exc()}
     return result
 
@@ -151,8 +151,8 @@ async def end_session( # Removed unused ctx parameter
         log_warning(f"end_session for session {session_id} cancelled: {e_cancel}")
         # Still attempt to return a status indicating what might have happened if possible
         return {"session_id": session_id, "error": "Session end cancelled", "success": False, "status": "cancelled_cleanup_attempted"}
-    except RuntimeError as e_exec: # Changed from Exception to RuntimeError
-        log_error(f"RuntimeError from anyio.to_thread.run_sync for end_session (session {session_id}): {str(e_exec)}\n{traceback.format_exc()}") # Removed exc_info, added traceback
+    except Exception as e_exec: # Catch general Exception
+        log_error(f"Exception from anyio.to_thread.run_sync for end_session (session {session_id}): {str(e_exec)}\n{traceback.format_exc()}")
         return {"session_id": session_id, "error": f"Failed to end session: {str(e_exec)}", "success": False, "status": "error", "error_details": traceback.format_exc()}
     
     # Note: cleanup_session_executor is now handled by anyio's thread management
