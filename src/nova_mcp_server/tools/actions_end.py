@@ -87,9 +87,9 @@ def end_session_action(session_id: str) -> Dict[str, Any]:
             active_sessions.pop(session_id, None) 
         
         # It's better if cleanup_session_executor is robust to session_id not being in its dict
-        from ..tools.browser_control import cleanup_session_executor # Assuming this path
-        cleanup_session_executor(session_id)
-        log_info(f"Session {session_id} registry cleaned and executor cleanup requested.")
+        # from ..tools.browser_control import cleanup_session_executor # Assuming this path
+        # cleanup_session_executor(session_id) # REMOVED as anyio handles thread pool
+        log_info(f"Session {session_id} registry cleaned.")
         
         return {
             "session_id": session_id,
@@ -107,11 +107,11 @@ def end_session_action(session_id: str) -> Dict[str, Any]:
         with session_lock:
             active_sessions.pop(session_id, None)
         
-        try:
-            from ..tools.browser_control import cleanup_session_executor
-            cleanup_session_executor(session_id)
-        except Exception as e_cleanup_fail:
-            log_error(f"Failed to cleanup executor for session {session_id} during error handling: {e_cleanup_fail}")
+        # try:
+        #     from ..tools.browser_control import cleanup_session_executor
+        #     cleanup_session_executor(session_id)
+        # except Exception as e_cleanup_fail:
+        #     log_error(f"Failed to cleanup executor for session {session_id} during error handling: {e_cleanup_fail}")
             
         return {
             "session_id": session_id,

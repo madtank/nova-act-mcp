@@ -1,0 +1,283 @@
+import pytest
+import asyncio
+import json
+import os
+import sys
+import uuid  # For request IDs
+
+# Add project root to sys.path if necessary
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.insert(0, project_root)
+
+from nova_mcp_server.config import initialize_environment  # For consistency, though not strictly needed by CLI test itself
+
+# Pytest marker for skipping if API key is not available or in CI
+pytestmark = pytest.mark.skipif(
+    "NOVA_ACT_API_KEY" not in os.environ or os.environ.get("CI") == "true",
+    reason="Skipping MCP Inspector CLI tests in CI or when API key is not available"
+)
+
+@pytest.fixture(scope="module")  # Run server once per module
+async def mcp_server_process():
+    api_key = os.environ.get("NOVA_ACT_API_KEY")
+    if not api_key:
+        pytest.skip("NOVA_ACT_API_KEY not found for mcp_server_process fixture.")
+
+    cmd = [sys.executable, "-m", "nova_mcp_server"]  # Use sys.executable for current Python
+    
+    # Pass API key as environment variable to the server process
+    env = os.environ.copy()
+    env["NOVA_ACT_API_KEY"] = api_key
+    # env["NOVA_MCP_DEBUG"] = "1"  # Optional: for more server-side logging
+
+    print(f"Starting MCP server for tests: {' '.join(cmd)}")
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env
+    )
+
+    # Brief pause to ensure server has time to initialize
+    await asyncio.sleep(2) 
+    
+    # Check if server started without immediate error
+    if process.returncode is not None and process.returncode != 0:
+        stderr_output = ""
+        if process.stderr:
+            try:
+                stderr_bytes = await asyncio.wait_for(process.stderr.read(), timeout=1.0)
+                stderr_output = stderr_bytes.decode()
+            except asyncio.TimeoutError:
+                stderr_output = "Failed to read stderr (timeout)"
+        pytest.fail(f"MCP Server failed to start. Return code: {process.returncode}. Stderr: {stderr_output}")
+
+    yield process  # Provide the process object to tests
+
+    # Teardown: terminate the server
+    print("Terminating MCP server process...")
+    if process.returncode is None:  # Check if process is still running
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+            print("MCP Server process terminated.")
+        except asyncio.TimeoutError:
+            print("MCP Server process did not terminate gracefully, killing.")
+            process.kill()
+            await process.wait()
+    else:
+        print(f"MCP Server process already exited with code {process.returncode}.")
+
+# Helper function to run MCP Inspector CLI commands
+async def run_inspector_command(inspector_method_args):
+    api_key = os.environ.get("NOVA_ACT_API_KEY")
+    if not api_key:
+        pytest.skip("NOVA_ACT_API_KEY not found in environment for CLI test.")
+
+    # Construct the command carefully
+    # Base command for the inspector and passing the API key
+    cmd_prefix = f"npx @modelcontextprotocol/inspector --cli -e NOVA_ACT_API_KEY='{api_key}'"
+    
+    # Use a server command that will work reliably
+    server_cmd = "-- python -m nova_mcp_server"
+    
+    # For create_subprocess_shell, we pass a single command string
+    cmd_str = f"{cmd_prefix} {server_cmd} {' '.join(inspector_method_args)}"
+
+    print(f"Executing MCP Inspector CLI: {cmd_str}")
+
+    process = await asyncio.create_subprocess_shell(
+        cmd_str,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await process.communicate()
+
+    if process.returncode != 0:
+        print(f"MCP Inspector CLI Error (stderr): {stderr.decode().strip()}")
+        pytest.fail(f"MCP Inspector CLI command failed with exit code {process.returncode}. stderr: {stderr.decode().strip()}")
+
+    stdout_str = stdout.decode().strip()
+    print(f"MCP Inspector CLI Output (stdout): {stdout_str}")
+    
+    try:
+        return json.loads(stdout_str)
+    except json.JSONDecodeError as e:
+        pytest.fail(f"Failed to decode JSON from MCP Inspector CLI output: {e}. Output was: {stdout_str}")
+
+@pytest.mark.asyncio
+async def test_mcp_cli_list_tools():
+    """Test listing MCP tools via CLI tool"""
+    initialize_environment()  # Ensures .env is loaded if pytest-dotenv didn't catch it
+    
+    method_args = ['--method', 'tools/list']
+    
+    response = await run_inspector_command(method_args)
+    
+    assert isinstance(response.get("tools"), list), "Response should have a 'tools' list"
+    tool_names = [tool.get("name") for tool in response["tools"]]
+    
+    assert "browser_session" in tool_names
+    assert "inspect_browser" in tool_names
+    assert "list_browser_sessions" in tool_names
+    print("MCP CLI tools/list verification PASSED")
+
+@pytest.mark.asyncio
+async def test_mcp_cli_session_lifecycle():
+    """Test creating, inspecting, and ending a browser session via MCP Inspector CLI"""
+    initialize_environment()
+    session_id = None
+
+    try:
+        # 1. Start session
+        print("--- MCP CLI: Starting session ---")
+        start_method_args = [
+            "--method", "tools/call", "--tool-name", "browser_session",
+            "--tool-arg", "action=start",
+            "--tool-arg", "url=https://example.com",
+            "--tool-arg", "headless=true",
+            "--tool-arg", "kwargs={}"  # Add kwargs for pydantic validation
+        ]
+        start_response = await run_inspector_command(start_method_args)
+        
+        # Handle response - need to parse JSON from the text field
+        start_text = start_response.get("content", [{}])[0].get("text", "{}")
+        try:
+            start_result = json.loads(start_text)
+            session_id = start_result.get("session_id")
+        except json.JSONDecodeError as e:
+            pytest.fail(f"Failed to parse JSON from response text: {e}. Text was: {start_text}")
+            
+        assert session_id, f"session_id missing from parsed start response: {start_result}"
+        assert start_result.get("status") == "ready", f"Start status not ready: {start_result}"
+        print(f"MCP CLI browser_session start OK, session_id: {session_id}")
+
+        # Wait briefly to ensure the browser session is fully initialized
+        await asyncio.sleep(2)
+        
+        # 2. Inspect session
+        print(f"--- MCP CLI: Inspecting session {session_id} ---")
+        inspect_method_args = [
+            "--method", "tools/call", "--tool-name", "inspect_browser",
+            "--tool-arg", f"session_id={session_id}"
+        ]
+        inspect_response = await run_inspector_command(inspect_method_args)
+        
+        # Parse the inspect response text as JSON
+        inspect_text = inspect_response.get("content", [{}])[0].get("text", "{}")
+        try:
+            inspect_result = json.loads(inspect_text)
+        except json.JSONDecodeError as e:
+            pytest.fail(f"Failed to parse JSON from inspect response text: {e}. Text was: {inspect_text}")
+        
+        assert inspect_result.get("success") is True, f"Inspect success not True: {inspect_result}"
+        assert inspect_result.get("current_url") == "https://example.com/", f"Inspect URL mismatch: {inspect_result}"
+        assert "Example Domain" in inspect_result.get("page_title", ""), f"Inspect title mismatch: {inspect_result}"
+        
+        content = inspect_result.get("content", [])
+        img_content = next((c for c in content if c.get("type") == "image_base64"), None)
+        assert img_content is not None, "image_base64 missing from inspect_browser result"
+        img_data = img_content.get("data", "")
+        assert img_data.startswith("data:image/jpeg;base64,"), "Screenshot data format incorrect"
+        print("MCP CLI inspect_browser OK")
+
+    finally:
+        if session_id:
+            # 3. End session
+            print(f"--- MCP CLI: Ending session {session_id} ---")
+            end_method_args = [
+                "--method", "tools/call", "--tool-name", "browser_session",
+                "--tool-arg", "action=end",
+                "--tool-arg", f"session_id={session_id}",
+                "--tool-arg", "kwargs={}"  # Add kwargs for pydantic validation
+            ]
+            end_response = await run_inspector_command(end_method_args)
+            
+            # Parse the end response text as JSON
+            end_text = end_response.get("content", [{}])[0].get("text", "{}")
+            try:
+                end_result = json.loads(end_text)
+            except json.JSONDecodeError as e:
+                pytest.fail(f"Failed to parse JSON from end response text: {e}. Text was: {end_text}")
+                
+            assert end_result.get("success") is True, f"End session not successful: {end_result}"
+            print("MCP CLI browser_session end OK")
+        
+        # Handle response - need to parse JSON from the text field
+        start_text = start_response.get("content", [{}])[0].get("text", "{}")
+        try:
+            start_result = json.loads(start_text)
+            session_id = start_result.get("session_id")
+        except json.JSONDecodeError as e:
+            pytest.fail(f"Failed to parse JSON from response text: {e}. Text was: {start_text}")
+            
+        assert session_id, f"session_id missing from parsed start response: {start_result}"
+        assert start_result.get("status") == "ready", f"Start status not ready: {start_result}"
+        print(f"MCP CLI browser_session start OK, session_id: {session_id}")
+
+        # 2. Inspect session
+        print(f"--- MCP CLI: Inspecting session {session_id} ---")
+        inspect_method_args = [
+            "--method", "tools/call", "--tool-name", "inspect_browser",
+            "--tool-arg", f"session_id={session_id}"
+        ]
+        inspect_response = await run_inspector_command(server_args, inspect_method_args)
+        
+        # Parse the inspect response text as JSON
+        inspect_text = inspect_response.get("content", [{}])[0].get("text", "{}")
+        try:
+            inspect_result = json.loads(inspect_text)
+        except json.JSONDecodeError as e:
+            pytest.fail(f"Failed to parse JSON from inspect response text: {e}. Text was: {inspect_text}")
+        
+        assert inspect_result.get("success") is True, f"Inspect success not True: {inspect_result}"
+        assert inspect_result.get("current_url") == "https://example.com/", f"Inspect URL mismatch: {inspect_result}"
+        assert "Example Domain" in inspect_result.get("page_title", ""), f"Inspect title mismatch: {inspect_result}"
+        
+        content = inspect_result.get("content", [])
+        img_content = next((c for c in content if c.get("type") == "image_base64"), None)
+        assert img_content is not None, "image_base64 missing from inspect_browser result"
+        img_data = img_content.get("data", "")
+        assert img_data.startswith("data:image/jpeg;base64,"), "Screenshot data format incorrect"
+        print("MCP CLI inspect_browser OK")
+
+    finally:
+        # Clean up the session and server process
+        if session_id:
+            # 3. End session
+            print(f"--- MCP CLI: Ending session {session_id} ---")
+            end_method_args = [
+                "--method", "tools/call", "--tool-name", "browser_session",
+                "--tool-arg", "action=end",
+                "--tool-arg", f"session_id={session_id}",
+                "--tool-arg", "kwargs={}"  # Add kwargs for pydantic validation
+            ]
+            try:
+                end_response = await run_inspector_command(server_args, end_method_args)
+                
+                # Parse the end response text as JSON
+                end_text = end_response.get("content", [{}])[0].get("text", "{}")
+                try:
+                    end_result = json.loads(end_text)
+                except json.JSONDecodeError as e:
+                    print(f"Failed to parse JSON from end response text: {e}. Text was: {end_text}")
+                    
+                if end_result.get("success") is True:
+                    print("MCP CLI browser_session end OK")
+                else:
+                    print(f"Warning: End session not successful: {end_result}")
+            except Exception as e:
+                print(f"Error ending session: {e}")
+        
+        # Terminate the server subprocess
+        try:
+            # Send SIGTERM signal
+            proc.terminate()
+            # Wait for the process to terminate
+            await asyncio.wait_for(proc.wait(), timeout=5)
+            print("Server process terminated")
+        except Exception as e:
+            print(f"Error terminating server process: {e}")
+            # Force kill if needed
+            proc.kill()

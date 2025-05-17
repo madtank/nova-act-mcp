@@ -206,7 +206,8 @@ def run_entire_execution_in_thread(
     instructions: str = "",
     timeout: int = DEFAULT_TIMEOUT,
     retry_attempts: int = MAX_RETRY_ATTEMPTS,
-    quiet: bool = False
+    quiet: bool = False,
+    mcp_context: Optional[Any] = None # Added mcp_context
 ):
     """
     Run the entire browser task execution in a single thread to avoid
@@ -393,19 +394,22 @@ def run_entire_execution_in_thread(
         "url": current_url,
         "agent_thinking": agent_messages,
         "result_object": result  # Include the original result for possible further processing
+        # mcp_context is not returned, it's used for progress reporting if implemented
     }
 
 
-async def execute_session_action(
+# Renamed from execute_session_action and made synchronous
+def execute_session_action_sync( 
     session_id: str,
     task: str,
-    instructions: str = "",
+    instructions: Optional[str] = None, # Changed from str = "" to Optional[str] = None
     timeout: int = DEFAULT_TIMEOUT,
-    retry_attempts: int = MAX_RETRY_ATTEMPTS,  # CORRECTED DEFAULT
+    retry_attempts: int = MAX_RETRY_ATTEMPTS,
     quiet: bool = False,
+    mcp_context: Optional[Any] = None # For progress, matches run_entire_execution_in_thread
 ) -> Dict[str, Any]:
     """
-    Execute a task within an existing browser session.
+    Execute a task within an existing browser session. Synchronous version.
     
     Args:
         session_id: The session ID to use
@@ -414,6 +418,7 @@ async def execute_session_action(
         timeout: Timeout in seconds
         retry_attempts: Number of retry attempts
         quiet: Whether to suppress progress logging
+        mcp_context: MCP context for potential progress reporting
         
     Returns:
         dict: A dictionary containing the results of the task execution
@@ -435,10 +440,10 @@ async def execute_session_action(
     
     # Check if the session exists
     nova = None
-    nova_session_id = None
+    nova_session_id_attr = None # Renamed from nova_session_id to avoid conflict
     identity = None
-    executor = None
-    
+    # executor = None # Executor is managed by anyio now
+
     with session_lock:
         if session_id not in active_sessions:
             return {
@@ -450,7 +455,7 @@ async def execute_session_action(
         session_data = active_sessions[session_id]
         nova = session_data.get("nova_instance")
         identity = session_data.get("identity")
-        executor = session_data.get("executor")
+        # executor = session_data.get("executor") # Not needed here
         
         if not nova:
             return {
@@ -470,13 +475,9 @@ async def execute_session_action(
     
     # Get Nova's session ID for debugging
     if hasattr(nova, "session_id"):
-        nova_session_id = nova.session_id
+        nova_session_id_attr = nova.session_id
     
-    # Create a thread pool executor for the session if it doesn't exist
-    if executor is None:
-        executor = ThreadPoolExecutor(max_workers=1)
-        with session_lock:
-            active_sessions[session_id]["executor"] = executor
+    # Removed executor management, as anyio handles threading
     
     try:
         # Execute the task
@@ -494,18 +495,16 @@ async def execute_session_action(
                 active_sessions[session_id]["last_updated"] = time.time()
                 active_sessions[session_id]["status"] = "running"
         
-        # Execute the entire browser task in a single thread to ensure context consistency
-        loop = asyncio.get_event_loop()
-        thread_result = await loop.run_in_executor(
-            executor,
-            run_entire_execution_in_thread,
+        # Directly call the synchronous function that performs the blocking work
+        thread_result = run_entire_execution_in_thread(
             nova,           # Pass the NovaAct instance
             session_id,     # Pass the session ID
             task,           # Pass the task
             instructions,   # Pass instructions
             timeout,        # Pass timeout
             retry_attempts, # Pass retry attempts
-            quiet           # Pass quiet flag
+            quiet,          # Pass quiet flag
+            mcp_context     # Pass mcp_context
         )
         
         # Update progress
@@ -529,7 +528,7 @@ async def execute_session_action(
         # Prepare the result
         result_dict = {
             "session_id": session_id,
-            "nova_session_id": nova_session_id,
+            "nova_session_id": nova_session_id_attr,
             "identity": identity,
             "task": task,
             "instructions": instructions,
@@ -537,25 +536,18 @@ async def execute_session_action(
             "step_results": thread_result.get("step_results", []),
             "timestamp": time.time(),
             "url": thread_result.get("url"),
+            # Unpack other fields from thread_result like html_log_path, agent_thinking
+            "html_log_path": thread_result.get("html_log_path"),
+            "agent_thinking": thread_result.get("agent_thinking", []),
         }
-        
-        # Add HTML log path if available
-        if "html_log_path" in thread_result and thread_result["html_log_path"]:
-            result_dict["html_log_path"] = thread_result["html_log_path"]
-        
-        # Add agent thinking if available
-        if "agent_thinking" in thread_result:
-            result_dict["agent_thinking"] = thread_result.get("agent_thinking", [])
-        
-        # Add error message if available
+                
+        # Add error message if available from thread_result
         if "error" in thread_result and thread_result["error"]:
             result_dict["error"] = thread_result["error"]
             
         # Add content field for compatibility with test_nova_act_workflow
-        # This field is used in the test to verify that content was returned
         content = []
         
-        # Add the task response as text content
         if thread_result.get("step_results"):
             for step in thread_result["step_results"]:
                 if "response" in step and step["response"]:
@@ -564,7 +556,6 @@ async def execute_session_action(
                         "text": step["response"]
                     })
         
-        # If no step responses, add a default message based on success
         if not content:
             message = "Task executed successfully." if thread_result.get("success", False) else "Task execution failed."
             if thread_result.get("error"):
@@ -575,25 +566,21 @@ async def execute_session_action(
                 "text": message
             })
             
-        # Add URL if available
         if thread_result.get("url"):
             content.append({
                 "type": "url",
                 "url": thread_result["url"]
             })
             
-        # Add the content field to the result
         result_dict["content"] = content
         
         log(f"Task complete: {thread_result.get('success', False)}")
         return result_dict
     
     except Exception as e:
-        # Handle any exceptions
         error_details = traceback.format_exc()
-        log_error(f"Error executing browser session: {str(e)}\n{error_details}")
+        log_error(f"Error executing browser session (sync wrapper): {str(e)}\n{error_details}")
         
-        # Update session registry
         with session_lock:
             if session_id in active_sessions:
                 active_sessions[session_id]["progress"] = {
@@ -606,10 +593,9 @@ async def execute_session_action(
                 active_sessions[session_id]["last_updated"] = time.time()
                 active_sessions[session_id]["status"] = "failed"
         
-        # Prepare error result
-        error_result = {
+        return {
             "session_id": session_id,
-            "nova_session_id": nova_session_id,
+            "nova_session_id": nova_session_id_attr,
             "identity": identity,
             "task": task,
             "instructions": instructions,
@@ -617,16 +603,5 @@ async def execute_session_action(
             "error": str(e),
             "error_details": error_details,
             "timestamp": time.time(),
-            # Add content field even for errors to maintain API consistency
-            "content": [{
-                "type": "text",
-                "text": f"Error executing task: {str(e)}"
-            }]
+            "content": [{"type": "text", "text": f"Error executing task: {str(e)}"}]
         }
-        
-        # Add HTML log path if it was set earlier
-        html_log_path = locals().get("html_log_path")
-        if html_log_path:
-            error_result["html_log_path"] = html_log_path
-        
-        return error_result
