@@ -1,6 +1,6 @@
 [project]
 name = "nova-act-mcp-server"
-version = "3.1.0"  # Major feature update with refactored tool structure
+version = "3.1.1"  # Patch release: Fix exception handling and screenshot behavior
 description = "An MCP server providing tools to control web browsers using the Amazon Nova Act SDK"
 authors = [
     {name = "Jacob Taunton", email = "jandrewt82@gmail.com"}
