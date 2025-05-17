@@ -70,13 +70,6 @@ def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inl
         inline_image_quality: JPEG quality (1-100) for screenshot if included
     """
     from .actions_start import active_sessions
-    from ..config import log_debug, log_error, log_warning, log_info, MAX_INLINE_IMAGE_BYTES, INLINE_IMAGE_QUALITY
-    from ..utils import _normalize_logs_dir
-    import base64
-    import time
-    import traceback
-    import glob
-    import os
 
     nova = None
     browser_state = {}
@@ -151,8 +144,8 @@ def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inl
             agent_thinking_messages.append({"type": "system_error", "content": screenshot_status_message, "source": "inspect_browser"})
     else:
         log_debug(f"[{session_id}] Skipping screenshot capture as include_screenshot_flag is False")
-        screenshot_status_message = "Screenshot capture skipped (include_screenshot=False)"
-        agent_thinking_messages.append({"type": "system_info", "content": screenshot_status_message, "source": "inspect_browser"})
+        # Don't set screenshot_status_message for the default case (no screenshot)
+        # Don't add a system_info message to agent_thinking for the default case
 
     # Logs directory
     logs_dir_from_session = active_sessions.get(session_id, {}).get("logs_dir")
@@ -180,15 +173,15 @@ def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inl
 
     content_for_response = [{"type": "text", "text": f"Current URL: {current_url}\nPage Title: {page_title}"}]
     
-    # Only add screenshot to content if include_screenshot_flag is True and we have a valid screenshot
-    if include_screenshot_flag and inline_screenshot:
+    # Only add screenshot to content if include_screenshot_flag is True AND we have a valid screenshot
+    if include_screenshot_flag and inline_screenshot is not None:
         content_for_response.insert(0, {
             "type": "image_base64",
             "data": inline_screenshot,
             "caption": "Current viewport"
         })
     
-    # Add screenshot status message to agent_thinking if we have one and it's not already there
+    # Add screenshot status message to agent_thinking if it exists (only happens when include_screenshot_flag is True)
     if screenshot_status_message and not any(msg.get('content') == screenshot_status_message for msg in agent_thinking_messages):
         agent_thinking_messages.append({
             "type": "system_info",
