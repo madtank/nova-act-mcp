@@ -1,0 +1,109 @@
+flowchart TD
+    subgraph "Nova Act MCP System"
+        direction TB
+        
+        subgraph "Core MCP Tools"
+            direction LR
+            list["list_browser_sessions()"]
+            control["control_browser()"]
+            view["view_html_log()"]
+            compress["compress_logs()"]
+            viewcomp["view_compressed_log()"]
+            fetch["fetch_file()"]
+        end
+        
+        subgraph "Session Management"
+            direction TB
+            StartSession["Start Browser Session\n(control_browser action='start')"]
+            ExecuteSession["Execute Action\n(control_browser action='execute')"]
+            EndSession["End Browser Session\n(control_browser action='end')"]
+            
+            StartSession --> ExecuteSession
+            ExecuteSession --> ExecuteSession
+            ExecuteSession --> EndSession
+        end
+        
+        subgraph "Log Management"
+            direction TB
+            ViewLogs["View HTML Logs\n(view_html_log)"]
+            CompressLogs["Compress Logs\n(compress_logs)"]
+            ViewCompLogs["View Compressed Logs\n(view_compressed_log)"]
+            DownloadFile["Download File\n(fetch_file)"]
+            
+            ViewLogs --> CompressLogs
+            CompressLogs --> ViewCompLogs
+            ViewCompLogs --> DownloadFile
+        end
+        
+        subgraph "Nova Act SDK"
+            NovaAct["NovaAct Engine"]
+            Browser["Web Browser\n(Headless/Visible)"]
+            APIKey["Nova Act API Key"]
+            
+            NovaAct <--> Browser
+            APIKey --> NovaAct
+        end
+        
+        subgraph "Session Registry"
+            ActiveSessions[("Active Sessions\nRegistry")]
+            SessionsCleanup["Cleanup Old Sessions"]
+            
+            ActiveSessions --> SessionsCleanup
+        end
+        
+        subgraph "Workflows"
+            direction TB
+            Basic["Basic Workflow:\nStart → Execute → End"]
+            Interactive["Interactive Workflow:\nStart → Multiple Execute → End"]
+            DataExtraction["Data Extraction:\nStart → Schema Execute → Extract → End"]
+            LogAnalysis["Log Analysis:\nExecute → View Logs → Extract Thinking"]
+        end
+    end
+    
+    %% Connection between components
+    list --> ActiveSessions
+    
+    StartSession --> ActiveSessions
+    StartSession --> NovaAct
+    ExecuteSession --> NovaAct
+    EndSession --> ActiveSessions
+    
+    NovaAct --> ViewLogs
+    NovaAct -- "Agent Thinking" --> ViewLogs
+    
+    ActiveSessions --> ViewLogs
+    ActiveSessions --> CompressLogs
+    
+    %% Example workflow connections
+    Basic --> StartSession
+    Basic --> ExecuteSession
+    Basic --> EndSession
+    
+    Interactive --> StartSession
+    Interactive --> ExecuteSession
+    Interactive --> ViewLogs
+    Interactive --> EndSession
+    
+    DataExtraction --> StartSession
+    DataExtraction --> ExecuteSession
+    DataExtraction --> EndSession
+    
+    LogAnalysis --> ExecuteSession
+    LogAnalysis --> ViewLogs
+    LogAnalysis --> CompressLogs
+    
+    %% Style definitions - Updated for dark mode
+    classDef tool fill:#ff9999,stroke:#ffffff,stroke-width:2px,color:#000000
+    classDef session fill:#99ccff,stroke:#ffffff,stroke-width:2px,color:#000000
+    classDef logs fill:#99ff99,stroke:#ffffff,stroke-width:2px,color:#000000
+    classDef novaAct fill:#ffcc99,stroke:#ffffff,stroke-width:2px,color:#000000
+    classDef registry fill:#ff99cc,stroke:#ffffff,stroke-width:2px,color:#000000
+    classDef workflow fill:#ddddff,stroke:#ffffff,stroke-width:2px,stroke-dasharray:5 5,color:#000000
+    
+    %% Apply styles
+    class list,control,view,compress,viewcomp,fetch tool
+    class StartSession,ExecuteSession,EndSession session
+    class ViewLogs,CompressLogs,ViewCompLogs,DownloadFile logs
+    class NovaAct,Browser,APIKey novaAct
+    class ActiveSessions,SessionsCleanup registry
+    class Basic,Interactive,DataExtraction,LogAnalysis workflow

@@ -72,7 +72,7 @@ with patch.dict('sys.modules', {
     
     # Import with NOVA_ACT_AVAILABLE set to True
     with patch('builtins.__import__', side_effect=__import__):
-        import nova_mcp
+        import nova_mcp_server as nova_mcp
         nova_mcp.NOVA_ACT_AVAILABLE = True
         nova_mcp.NOVA_ACT_API_KEY = "mock-api-key"
         nova_mcp.mcp = mock_mcp
@@ -193,7 +193,7 @@ async def mock_browser_session(
         )
 
 # We need to patch the entire module functions
-from nova_mcp import list_browser_sessions, view_html_log
+from nova_mcp_server.tools import list_browser_sessions, view_html_log
 
 # Mock the functions
 browser_session = mock_browser_session

@@ -1,0 +1,31 @@
+flowchart TD
+    %% Define node styles with stronger colors for dark mode visibility
+    classDef agent fill:#ff9999,stroke:#000,stroke-width:2px
+    classDef browser fill:#99ff99,stroke:#000,stroke-width:2px
+    classDef screenshot fill:#ffff99,stroke:#000,stroke-width:2px
+    classDef htmlLog fill:#99ccff,stroke:#000,stroke-width:2px
+    classDef jsonLog fill:#e699ff,stroke:#000,stroke-width:2px
+    classDef gzip fill:#ccccff,stroke:#000,stroke-width:2px
+
+    Agent["LLM - Agent"]
+    Browser["Nova-Browser<br>(Playwright + Nova Act)"]
+    Screenshot["JPEG screenshot<br>(~40 KB)"]
+    HTMLLog["_output.html<br>(~10 KB)"]
+    JSONLog["calls.json<br>(no screenshot<br>~15 KB)"]
+    GZip["calls.json.gz<br>(~3 KB)"]
+
+    %% Use single connections but with more neutral text labels that don't trigger markdown parsing
+    Agent-->|"[Step 1] control_browser start/execute"|Browser
+    Browser-->|"[Step 2] page.screenshot"|Screenshot
+    Browser-->|"[Step 3] writes"|HTMLLog
+    Browser-->|"[Step 4] writes (no b64)"|JSONLog
+    Agent-->|"[Step 5] view_html_log"|HTMLLog
+    Agent-->|"[Step 6] compress_logs"|GZip
+
+    %% Apply class styles to nodes
+    class Agent agent
+    class Browser browser
+    class Screenshot screenshot
+    class HTMLLog htmlLog
+    class JSONLog jsonLog
+    class GZip gzip

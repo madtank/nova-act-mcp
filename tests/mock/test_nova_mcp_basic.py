@@ -105,15 +105,15 @@ def setup_module(module):
     sys.modules['fastmcp'] = MagicMock()
     
     # Remove any previous imports
-    if 'nova_mcp' in sys.modules:
-        del sys.modules['nova_mcp']
+    if 'nova_mcp_server' in sys.modules:
+        del sys.modules['nova_mcp_server']
     
     # Now import nova_mcp for testing
-    import nova_mcp
+    import nova_mcp_server as nova_mcp
     
     # Set up the environment for tests
-    nova_mcp.NOVA_ACT_AVAILABLE = True
-    nova_mcp.NOVA_ACT_API_KEY = "mock-api-key"
+    nova_mcp.config.NOVA_ACT_AVAILABLE = True
+    nova_mcp.config.NOVA_ACT_API_KEY = "mock-api-key"
     
     # Replace functions with our mocks
     nova_mcp.browser_session = mock_browser_session
@@ -154,7 +154,7 @@ TEST_URL = "https://example.com"
 async def test_start_and_end_session():
     """Test starting and ending a session"""
     # Import nova_mcp here to ensure mocks are applied
-    import nova_mcp
+    import nova_mcp_server as nova_mcp
     
     # Start a session
     rsp = await nova_mcp.browser_session(action="start", url=TEST_URL)
@@ -178,7 +178,7 @@ async def test_start_and_end_session():
 async def test_view_html_log_roundtrip():
     """Test the full flow of start->execute->view log->end"""
     # Import nova_mcp here to ensure mocks are applied
-    import nova_mcp
+    import nova_mcp_server as nova_mcp
     
     # Start a session
     rsp = await nova_mcp.browser_session(action="start", url=TEST_URL)

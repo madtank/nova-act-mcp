@@ -1,9 +1,12 @@
+"""
+Unit tests for verifying tool registration in nova_mcp_server.
+
+This test verifies that all tools are properly registered with the MCP server.
+It uses mocks to avoid relying on external dependencies.
+"""
 import sys
-import os
 import pytest
-import json
-import asyncio
-from unittest.mock import patch, MagicMock, Mock
+from unittest.mock import patch, MagicMock
 
 # Create a mock class for Tool
 class MockTool:
@@ -55,37 +58,40 @@ def setup_module(module):
     sys.modules['nova_act'] = mock_nova_act
     sys.modules['fastmcp'] = mock_fastmcp
     
-    # Import nova_mcp with our mocks in place
-    if 'nova_mcp' in sys.modules:
-        del sys.modules['nova_mcp']
+    # Import nova_mcp_server with our mocks in place
+    if 'nova_mcp_server' in sys.modules:
+        del sys.modules['nova_mcp_server']
     
-    import nova_mcp
-    nova_mcp.NOVA_ACT_AVAILABLE = True
+    import nova_mcp_server
+    nova_mcp_server.NOVA_ACT_AVAILABLE = True
     
-    # Manually register the three expected tools for the test
+    # Manually register the expected tools for the test
     mock_mcp_instance_for_unit_test.tools = [
         MockTool('list_browser_sessions'),
-        MockTool('control_browser'),
+        MockTool('browser_session'),  # renamed from control_browser
         MockTool('view_html_log'),
-        MockTool('compress_logs')  # Add the new compression tool
+        MockTool('compress_logs'),
+        MockTool('inspect_browser'),
+        MockTool('view_compressed_log'),
+        MockTool('fetch_file')
     ]
     
-    # Replace nova_mcp's mcp instance with our mock
-    nova_mcp.mcp = mock_mcp_instance_for_unit_test
+    # Replace nova_mcp_server's mcp instance with our mock
+    nova_mcp_server.mcp = mock_mcp_instance_for_unit_test
     
-    print("[Integration Setup] Reloaded nova_mcp.")
+    print("[Integration Setup] Reloaded nova_mcp_server.")
     print(f"[Integration Setup] Registered mock tools: {[t.name for t in mock_mcp_instance_for_unit_test.tools]}")
 
 # --- Teardown Unit Test Environment ---
 def teardown_module(module):
     """Clean up after all tests have run."""
-    print("\n[Teardown] Stopping patches for test_nova_mcp.py")
+    print("\n[Teardown] Stopping patches for test_tool_registration.py")
     
     # Clean up module patching
     sys.modules.pop('nova_act', None)
     sys.modules.pop('fastmcp', None)
-    if 'nova_mcp' in sys.modules:
-        del sys.modules['nova_mcp']
+    if 'nova_mcp_server' in sys.modules:
+        del sys.modules['nova_mcp_server']
 
 # --- Unit Test ---
 def test_tool_registration():
@@ -98,7 +104,15 @@ def test_tool_registration():
     print(f"\nMock Registered tools: {tool_names}")
     
     # Check that all tools are registered
-    expected_tools = ['list_browser_sessions', 'control_browser', 'view_html_log', 'compress_logs']
+    expected_tools = [
+        'list_browser_sessions', 
+        'browser_session',  # renamed from control_browser 
+        'view_html_log', 
+        'compress_logs', 
+        'inspect_browser',
+        'view_compressed_log',
+        'fetch_file'
+    ]
     for tool_name in expected_tools:
         assert tool_name in tool_names, f"{tool_name} tool not registered"
     
@@ -106,17 +120,7 @@ def test_tool_registration():
     assert len(tool_names) >= len(expected_tools), f"Expected at least {len(expected_tools)} tools, but found {len(tool_names)}"
     print("Tool registration test successful.")
 
-# Skip integration test if no API key
-@pytest.mark.skipif(not os.environ.get("NOVA_ACT_API_KEY"), reason="No API key for integration tests")
-def test_nova_act_workflow():
-    """Test the Nova Act workflow (requires actual API key)."""
-    try:
-        from nova_mcp import browser_session, list_browser_sessions, view_html_log
-        print("Imported real nova_mcp components for integration test")
-    except Exception as e:
-        pytest.skip(f"Failed to import/access nova_mcp components/tools: {str(e)}")
-
 # Keep the if __name__ == "__main__": block for direct execution
 if __name__ == "__main__":
-    # This allows running the tests directly using `python tests/test_nova_mcp.py`
+    # This allows running the tests directly using `python tests/unit/test_tool_registration.py`
     pytest.main(["-v", "-s", __file__])

@@ -7,7 +7,8 @@ This streamlined version avoids potential hanging issues.
 import asyncio
 import json
 import sys
-from nova_mcp import browser_session, inspect_browser, initialize_environment
+from nova_mcp_server.tools import browser_session, inspect_browser
+from nova_mcp_server.config import initialize_environment
 
 def truncate_base64(data, max_length=50):
     """Truncate base64 data for display purposes."""
