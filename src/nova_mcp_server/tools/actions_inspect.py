@@ -10,6 +10,8 @@ import time
 import traceback
 import glob
 import os
+import uuid
+import tempfile
 from typing import Dict, Any, List, Optional
 
 from ..config import (
@@ -31,7 +33,7 @@ from ..session_manager import (
 from ..utils import _normalize_logs_dir
 
 
-def inspect_browser_action(session_id: str, include_screenshot: bool = False) -> Dict[str, Any]:
+def inspect_browser_action(session_id: str, include_screenshot: bool = False, screenshot_quality: Optional[int] = None) -> Dict[str, Any]:
     """
     Get screenshots and current state of browser sessions.
 
@@ -57,9 +59,9 @@ def inspect_browser_action(session_id: str, include_screenshot: bool = False) ->
             "error_code": "NOVA_ACT_NOT_AVAILABLE",
         }
 
-    return _inspect_browser(session_id=session_id, include_screenshot_flag=include_screenshot, inline_image_quality=INLINE_IMAGE_QUALITY)
+    return _inspect_browser(session_id=session_id, include_screenshot_flag=include_screenshot, screenshot_quality=screenshot_quality if screenshot_quality is not None else INLINE_IMAGE_QUALITY)
 
-def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inline_image_quality: int = 60) -> dict:
+def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, screenshot_quality: Optional[int] = None) -> dict:
     """
     Inspect the current browser session and return page info and screenshot.
     This is run in a worker thread to avoid blocking the main event loop.
@@ -67,7 +69,7 @@ def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inl
     Args:
         session_id: ID of the browser session to inspect
         include_screenshot_flag: Whether to include a screenshot in the response
-        inline_image_quality: JPEG quality (1-100) for screenshot if included
+        screenshot_quality: JPEG quality (1-100) for screenshot if included. Defaults to INLINE_IMAGE_QUALITY if None.
     """
     from .actions_start import active_sessions
 
@@ -78,6 +80,17 @@ def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inl
     page_title = "Unknown Title"
     screenshot_status_message = None
     inline_screenshot = None
+    screenshot_file_path = None # Initialize screenshot_file_path
+
+    # Determine logs_dir early as it might be needed for saving screenshots
+    logs_dir_from_session = active_sessions.get(session_id, {}).get("logs_dir")
+    if logs_dir_from_session:
+        logs_dir = logs_dir_from_session
+        log_debug(f"[{session_id}] Using logs_dir from active session: {logs_dir}")
+    else:
+        # This part needs nova instance, so it must be after nova is fetched
+        # We will re-evaluate logs_dir after fetching nova if it's not set yet
+        logs_dir = None 
 
     try:
         session_data = active_sessions[session_id]
@@ -96,6 +109,12 @@ def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inl
             "session_id": session_id,
             "success": False,
         }
+    
+    # If logs_dir was not set from session, try to normalize it now that nova is available
+    if not logs_dir:
+        sdk_session_id_for_logs = active_sessions.get(session_id, {}).get("nova_session_id")
+        logs_dir = _normalize_logs_dir(nova, sdk_session_id_override=sdk_session_id_for_logs)
+        log_debug(f"[{session_id}] Normalized logs_dir after fetching nova (override: {sdk_session_id_for_logs}): {logs_dir}")
 
     # Get current URL via direct Playwright property
     try:
@@ -128,36 +147,53 @@ def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inl
     # Screenshot logic: only try if include_screenshot_flag is True
     if include_screenshot_flag:
         try:
-            screenshot_data_bytes = nova.page.screenshot(type="jpeg", quality=inline_image_quality)
-            log_debug(f"[{session_id}] Screenshot captured via nova.page, size: {len(screenshot_data_bytes) if screenshot_data_bytes else 0} bytes")
+            quality_to_use = screenshot_quality if screenshot_quality is not None else INLINE_IMAGE_QUALITY
+            screenshot_data_bytes = nova.page.screenshot(type="jpeg", quality=quality_to_use)
+            log_debug(f"[{session_id}] Screenshot captured via nova.page, quality: {quality_to_use}, size: {len(screenshot_data_bytes) if screenshot_data_bytes else 0} bytes")
             if screenshot_data_bytes:
                 if len(screenshot_data_bytes) <= MAX_INLINE_IMAGE_BYTES:
                     inline_screenshot = "data:image/jpeg;base64," + base64.b64encode(screenshot_data_bytes).decode()
                     log_debug(f"[{session_id}] Screenshot prepared for inline ({len(screenshot_data_bytes)} bytes).")
-                else:
-                    screenshot_status_message = f"Screenshot captured but too large for inline response ({len(screenshot_data_bytes)}B > {MAX_INLINE_IMAGE_BYTES}B limit)."
-                    log_debug(f"[{session_id}] {screenshot_status_message}")
-                    agent_thinking_messages.append({"type": "system_warning", "content": screenshot_status_message, "source": "inspect_browser"})
+                else: # Screenshot is too large, save to file
+                    log_debug(f"[{session_id}] Screenshot too large for inline response ({len(screenshot_data_bytes)}B > {MAX_INLINE_IMAGE_BYTES}B limit). Attempting to save to file.")
+                    effective_logs_dir = logs_dir
+                    if not effective_logs_dir:
+                        effective_logs_dir = os.path.join(tempfile.gettempdir(), "nova_mcp_server_logs", session_id)
+                        log_warning(f"[{session_id}] logs_dir not available from session or nova instance. Using temporary fallback: {effective_logs_dir}")
+                    
+                    screenshots_dir = os.path.join(effective_logs_dir, "screenshots")
+                    try:
+                        if not os.path.exists(screenshots_dir):
+                            os.makedirs(screenshots_dir, exist_ok=True)
+                            log_info(f"[{session_id}] Created screenshots directory: {screenshots_dir}")
+                        
+                        filename = f"screenshot_{int(time.time())}_{uuid.uuid4().hex[:8]}.jpg"
+                        _screenshot_file_path = os.path.join(screenshots_dir, filename) # Use temporary variable
+                        
+                        with open(_screenshot_file_path, "wb") as f:
+                            f.write(screenshot_data_bytes)
+                        
+                        screenshot_file_path = _screenshot_file_path # Assign to main variable
+                        screenshot_status_message = f"Screenshot captured. Too large for inline, saved to: {screenshot_file_path}"
+                        log_info(f"[{session_id}] {screenshot_status_message}")
+                        # agent_thinking_messages.append({"type": "system_info", "content": screenshot_status_message, "source": "inspect_browser"}) # This will be added later from screenshot_status_message
+                    except Exception as e_save:
+                        screenshot_status_message = f"Screenshot captured but failed to save to file: {str(e_save)}"
+                        log_error(f"[{session_id}] {screenshot_status_message} \n{traceback.format_exc()}")
+                        # agent_thinking_messages.append({"type": "system_error", "content": screenshot_status_message, "source": "inspect_browser"})
+            elif not screenshot_data_bytes:
+                 screenshot_status_message = "Screenshot capture attempt returned no data."
+                 log_warning(f"[{session_id}] {screenshot_status_message}")
+
         except Exception as e_screenshot:
             screenshot_status_message = f"Error capturing screenshot via nova.page.screenshot(): {str(e_screenshot)}"
             log_error(f"[{session_id}] Screenshot capture failed: {screenshot_status_message} \n{traceback.format_exc()}")
             agent_thinking_messages.append({"type": "system_error", "content": screenshot_status_message, "source": "inspect_browser"})
     else:
         log_debug(f"[{session_id}] Skipping screenshot capture as include_screenshot_flag is False")
-        # Don't set screenshot_status_message for the default case (no screenshot)
-        # Don't add a system_info message to agent_thinking for the default case
 
-    # Logs directory
-    logs_dir_from_session = active_sessions.get(session_id, {}).get("logs_dir")
-    if logs_dir_from_session:
-        logs_dir = logs_dir_from_session
-        log_debug(f"[{session_id}] Using logs_dir from active session: {logs_dir}")
-    else:
-        sdk_session_id_for_logs = active_sessions.get(session_id, {}).get("nova_session_id")
-        logs_dir = _normalize_logs_dir(nova, sdk_session_id_override=sdk_session_id_for_logs)
-        log_debug(f"[{session_id}] Normalizing logs_dir again (override: {sdk_session_id_for_logs}): {logs_dir}")
-
-    if logs_dir:
+    # Populate browser_state with logs_dir and log_files if logs_dir is available
+    if logs_dir: # This 'logs_dir' is now determined much earlier
         browser_state["logs_directory"] = logs_dir
         log_files = []
         for ext in [".html", ".htm", ".json", ".log", "trace.zip"]:
@@ -196,6 +232,7 @@ def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inl
         "content": content_for_response,
         "agent_thinking": agent_thinking_messages,
         "browser_state": browser_state,
+        "screenshot_file_path": screenshot_file_path, # Add screenshot_file_path to return
         "timestamp": time.time(),
         "success": True
     }

@@ -97,11 +97,12 @@ async def execute_instruction(
 
 @mcp.tool(
     name="inspect_browser",
-    description="Retrieves current state (URL, title) of an active browser session. Screenshot is omitted by default. Set include_screenshot=True to get a base64 JPEG (can be large)."
+    description="Retrieves current state (URL, title) of an active browser session. Screenshot is omitted by default. Set `include_screenshot=True` to get a base64 JPEG.\nYou can also specify `screenshot_quality` (1-100, default 60) to control JPEG compression.\nWarning: Setting `include_screenshot=True` can result in high token usage (potentially 100,000+ tokens) due to image data, even with quality adjustments. Lower quality reduces token cost but also image clarity."
 )
 async def inspect_browser( # Removed unused ctx parameter
-    session_id: str, 
-    include_screenshot: bool = False
+    session_id: str,
+    include_screenshot: bool = False,
+    screenshot_quality: Optional[int] = None
 ) -> Dict[str, Any]:
     initialize_environment()
     if not session_id: return {"error": "session_id is required.", "error_code": "MISSING_PARAMETER"}
@@ -114,7 +115,7 @@ async def inspect_browser( # Removed unused ctx parameter
         # inspect_browser_action is the synchronous function from actions_inspect.py
         result = await anyio.to_thread.run_sync(
             inspect_browser_action,
-            session_id, include_screenshot,
+            session_id, include_screenshot, screenshot_quality,
             cancellable=True
         )
     except anyio.get_cancelled_exc_class() as e_cancel:
