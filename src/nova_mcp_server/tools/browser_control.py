@@ -12,7 +12,7 @@ import anyio # CRITICAL IMPORT
 
 from ..config import (
     initialize_environment, DEFAULT_TIMEOUT, DEFAULT_PROFILE_IDENTITY,
-    get_nova_act_api_key, NOVA_ACT_AVAILABLE, log_info, log_error, log_warning
+    get_nova_act_api_key, NOVA_ACT_AVAILABLE, log_info, log_error, log_warning, log_debug
 )
 from ..session_manager import active_sessions, session_lock # Still needed for session data
 
@@ -20,7 +20,7 @@ from .actions_start import initialize_browser_session
 # execute_session_action_sync will be called by execute_instruction tool
 from .actions_execute import execute_session_action_sync, MAX_RETRY_ATTEMPTS as EXECUTE_MAX_RETRY_ATTEMPTS
 from .actions_end import end_session_action
-from .actions_inspect import inspect_browser_action # The sync action function
+from .actions_inspect import inspect_browser_action, _inspect_browser_async # The sync action function and async function
 
 from .. import mcp # FastMCP instance
 
@@ -97,7 +97,7 @@ async def execute_instruction(
 
 @mcp.tool(
     name="inspect_browser",
-    description="Retrieves current state (URL, title) of an active browser session. Screenshot is omitted by default. Set include_screenshot=True to capture and save a screenshot to the logs directory (retrieve via fetch_file tool)."
+    description="Retrieves current state (URL, title) of an active browser session. Screenshot is omitted by default. Set include_screenshot=True to get a base64 JPEG (can be large)."
 )
 async def inspect_browser( # Removed unused ctx parameter
     session_id: str, 
@@ -111,17 +111,58 @@ async def inspect_browser( # Removed unused ctx parameter
             return {"error": f"Session {session_id} not found.", "error_code": "SESSION_NOT_FOUND"}
 
     try:
-        # inspect_browser_action is the synchronous function from actions_inspect.py
-        result = await anyio.to_thread.run_sync(
-            inspect_browser_action,
-            session_id, include_screenshot,
-            cancellable=True
-        )
+        # Call the async inspect function directly to avoid double-threading
+        from .actions_inspect import _inspect_browser_async
+        result = await _inspect_browser_async(session_id, include_screenshot)
+        
+        # Handle logs directory processing separately (synchronous part)
+        from .actions_start import active_sessions
+        from ..utils import _normalize_logs_dir
+        
+        # Get the nova instance for logs processing
+        try:
+            session_data = active_sessions[session_id]
+            nova = session_data.get("nova_instance")
+            
+            # Extract values from async result
+            browser_state = result.get("browser_state", {})
+            
+            # Logs directory processing (synchronous part)
+            logs_dir_from_session = active_sessions.get(session_id, {}).get("logs_dir")
+            if logs_dir_from_session:
+                logs_dir = logs_dir_from_session
+                log_debug(f"[{session_id}] Using logs_dir from active session: {logs_dir}")
+            else:
+                sdk_session_id_for_logs = active_sessions.get(session_id, {}).get("nova_session_id")
+                logs_dir = _normalize_logs_dir(nova, sdk_session_id_override=sdk_session_id_for_logs)
+                log_debug(f"[{session_id}] Normalizing logs_dir again (override: {sdk_session_id_for_logs}): {logs_dir}")
+
+            if logs_dir:
+                import glob
+                import os
+                browser_state["logs_directory"] = logs_dir
+                log_files = []
+                for ext in [".html", ".htm", ".json", ".log", "trace.zip"]:
+                    log_files.extend(glob.glob(os.path.join(logs_dir, f"*{ext}")))
+                log_files.sort(key=lambda x: os.path.getmtime(x) if os.path.exists(x) else 0, reverse=True)
+                browser_state["log_files"] = [
+                    {
+                        "path": str(f), "name": os.path.basename(f),
+                        "size": os.path.getsize(f) if os.path.exists(f) else 0,
+                        "mtime": os.path.getmtime(f) if os.path.exists(f) else 0,
+                    } for f in log_files[:10]
+                ]
+                
+                # Update the result with logs information
+                result["browser_state"] = browser_state
+        except Exception as e_logs:
+            log_warning(f"Could not process logs directory for session {session_id}: {e_logs}")
+            
     except anyio.get_cancelled_exc_class() as e_cancel:
         log_warning(f"inspect_browser for session {session_id} cancelled: {e_cancel}")
         return {"session_id": session_id, "error": "Inspection cancelled", "success": False, "status": "cancelled"}
     except Exception as e_exec: # Catch general Exception
-        log_error(f"Exception from anyio.to_thread.run_sync for inspect_browser (session {session_id}): {str(e_exec)}\n{traceback.format_exc()}")
+        log_error(f"Exception in inspect_browser (session {session_id}): {str(e_exec)}\n{traceback.format_exc()}")
         return {"session_id": session_id, "error": f"Failed to inspect browser: {str(e_exec)}", "success": False, "status": "error", "error_details": traceback.format_exc()}
     return result
 

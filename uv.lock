@@ -606,7 +606,7 @@ wheels = [
 
 [[package]]
 name = "nova-act-mcp-server"
-version = "3.1.1"
+version = "3.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "asyncio-extras" },
@@ -616,6 +616,7 @@ dependencies = [
     { name = "nova-act" },
     { name = "playwright" },
     { name = "pydantic" },
+    { name = "pytest" },
     { name = "python-dotenv" },
     { name = "rich" },
     { name = "structlog" },
@@ -646,6 +647,7 @@ requires-dist = [
     { name = "nova-act", specifier = ">=1.0.2579.0" },
     { name = "playwright", specifier = "==1.48.0" },
     { name = "pydantic", specifier = ">=2.11.4" },
+    { name = "pytest", specifier = ">=8.3.5" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.5" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.26.0" },
     { name = "pytest-dotenv", marker = "extra == 'dev'", specifier = ">=0.5.2" },

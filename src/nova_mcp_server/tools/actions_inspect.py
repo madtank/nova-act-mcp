@@ -37,8 +37,7 @@ def inspect_browser_action(session_id: str, include_screenshot: bool = False) ->
 
     Args:
         session_id: The session ID to inspect
-        include_screenshot: If True, captures a screenshot and saves it to the logs directory.
-                           The screenshot path is returned in the response for retrieval via fetch_file.
+        include_screenshot: If True, attempts to capture and include a base64 JPEG screenshot.
                            Defaults to False to save LLM context space.
 
     Returns:
@@ -60,16 +59,16 @@ def inspect_browser_action(session_id: str, include_screenshot: bool = False) ->
 
     return _inspect_browser(session_id=session_id, include_screenshot_flag=include_screenshot, inline_image_quality=INLINE_IMAGE_QUALITY)
 
-def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inline_image_quality: int = 60) -> dict:
+async def _inspect_browser_async(session_id: str, include_screenshot_flag: bool = False, inline_image_quality: int = 60) -> dict:
     """
-    Inspect the current browser session and return page info and screenshot.
-    This is run in a worker thread to avoid blocking the main event loop.
+    Async wrapper for browser inspection that handles thread-safe Nova Act calls.
 
     Args:
         session_id: ID of the browser session to inspect
         include_screenshot_flag: Whether to include a screenshot in the response
         inline_image_quality: JPEG quality (1-100) for screenshot if included
     """
+    import anyio
     from .actions_start import active_sessions
 
     nova = None
@@ -78,6 +77,7 @@ def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inl
     current_url = "Unknown URL"
     page_title = "Unknown Title"
     screenshot_status_message = None
+    inline_screenshot = None
 
     try:
         session_data = active_sessions[session_id]
@@ -97,9 +97,21 @@ def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inl
             "success": False,
         }
 
-    # Get current URL via direct Playwright property
+    # Helper function to get URL safely
+    def _get_url():
+        return nova.page.url
+
+    # Helper function to get title safely
+    def _get_title():
+        return nova.page.title()
+
+    # Helper function to get screenshot safely
+    def _get_screenshot():
+        return nova.page.screenshot(type="jpeg", quality=inline_image_quality)
+
+    # Get current URL via thread-safe call
     try:
-        current_url = nova.page.url
+        current_url = await anyio.to_thread.run_sync(_get_url, cancellable=True)
         log_debug(f"[{session_id}] Retrieved current URL via nova.page.url: {current_url}")
         browser_state["current_url"] = current_url
         browser_state["urls"] = [current_url]
@@ -109,9 +121,9 @@ def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inl
         browser_state["urls_error"] = str(e_url_direct)
         agent_thinking_messages.append({"type": "system_error", "content": error_msg, "source": "inspect_browser"})
 
-    # Get page title via direct Playwright method
+    # Get page title via thread-safe call
     try:
-        page_title_val = nova.page.title()
+        page_title_val = await anyio.to_thread.run_sync(_get_title, cancellable=True)
         if not isinstance(page_title_val, str):
             log_warning(f"[{session_id}] Page title from nova.page.title() is not a string ({type(page_title_val)}), converting.")
             page_title = str(page_title_val) if page_title_val is not None else "Unknown Title"
@@ -126,37 +138,17 @@ def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inl
         agent_thinking_messages.append({"type": "system_error", "content": error_msg, "source": "inspect_browser"})
 
     # Screenshot logic: only try if include_screenshot_flag is True
-    screenshot_path = None
     if include_screenshot_flag:
         try:
-            screenshot_data_bytes = nova.page.screenshot(type="jpeg", quality=inline_image_quality)
+            screenshot_data_bytes = await anyio.to_thread.run_sync(_get_screenshot, cancellable=True)
             log_debug(f"[{session_id}] Screenshot captured via nova.page, size: {len(screenshot_data_bytes) if screenshot_data_bytes else 0} bytes")
             if screenshot_data_bytes:
-                # Save screenshot to file in logs directory
-                logs_dir_from_session = active_sessions.get(session_id, {}).get("logs_dir")
-                if logs_dir_from_session:
-                    logs_dir = logs_dir_from_session
+                if len(screenshot_data_bytes) <= MAX_INLINE_IMAGE_BYTES:
+                    inline_screenshot = "data:image/jpeg;base64," + base64.b64encode(screenshot_data_bytes).decode()
+                    log_debug(f"[{session_id}] Screenshot prepared for inline ({len(screenshot_data_bytes)} bytes).")
                 else:
-                    sdk_session_id_for_logs = active_sessions.get(session_id, {}).get("nova_session_id")
-                    logs_dir = _normalize_logs_dir(nova, sdk_session_id_override=sdk_session_id_for_logs)
-                
-                if logs_dir:
-                    # Create screenshot filename with timestamp
-                    timestamp = int(time.time() * 1000)
-                    screenshot_filename = f"screenshot_{session_id}_{timestamp}.jpg"
-                    screenshot_path = os.path.join(logs_dir, screenshot_filename)
-                    
-                    # Write screenshot to file
-                    with open(screenshot_path, 'wb') as f:
-                        f.write(screenshot_data_bytes)
-                    
-                    screenshot_status_message = f"Screenshot saved to: {screenshot_path} ({len(screenshot_data_bytes)} bytes)"
+                    screenshot_status_message = f"Screenshot captured but too large for inline response ({len(screenshot_data_bytes)}B > {MAX_INLINE_IMAGE_BYTES}B limit)."
                     log_debug(f"[{session_id}] {screenshot_status_message}")
-                    browser_state["screenshot_path"] = screenshot_path
-                    browser_state["screenshot_size"] = len(screenshot_data_bytes)
-                else:
-                    screenshot_status_message = "Could not save screenshot: logs directory not available"
-                    log_warning(f"[{session_id}] {screenshot_status_message}")
                     agent_thinking_messages.append({"type": "system_warning", "content": screenshot_status_message, "source": "inspect_browser"})
         except Exception as e_screenshot:
             screenshot_status_message = f"Error capturing screenshot via nova.page.screenshot(): {str(e_screenshot)}"
@@ -167,7 +159,87 @@ def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inl
         # Don't set screenshot_status_message for the default case (no screenshot)
         # Don't add a system_info message to agent_thinking for the default case
 
-    # Logs directory
+    # Prepare content response
+    content_for_response = [{"type": "text", "text": f"Current URL: {current_url}\nPage Title: {page_title}"}]
+    
+    # Only add screenshot to content if include_screenshot_flag is True AND we have a valid screenshot
+    if include_screenshot_flag and inline_screenshot is not None:
+        content_for_response.insert(0, {
+            "type": "image_base64",
+            "data": inline_screenshot,
+            "caption": "Current viewport"
+        })
+    
+    # Add screenshot status message to agent_thinking if it exists (only happens when include_screenshot_flag is True)
+    if screenshot_status_message and not any(msg.get('content') == screenshot_status_message for msg in agent_thinking_messages):
+        agent_thinking_messages.append({
+            "type": "system_info",
+            "content": screenshot_status_message,
+            "source": "inspect_browser"
+        })
+
+    return {
+        "session_id": session_id,
+        "current_url": current_url,
+        "page_title": page_title,
+        "content": content_for_response,
+        "agent_thinking": agent_thinking_messages,
+        "browser_state": browser_state,
+        "timestamp": time.time(),
+        "success": True
+    }
+
+def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inline_image_quality: int = 60) -> dict:
+    """
+    Synchronous wrapper that runs the async inspection function.
+    This is called by anyio.to_thread.run_sync() from browser_control.py.
+
+    Args:
+        session_id: ID of the browser session to inspect
+        include_screenshot_flag: Whether to include a screenshot in the response
+        inline_image_quality: JPEG quality (1-100) for screenshot if included
+    """
+    import anyio
+    
+    async def _run_async():
+        return await _inspect_browser_async(session_id, include_screenshot_flag, inline_image_quality)
+    
+    # Run the async function and get the result
+    result = anyio.run(_run_async)
+    
+    # Extract values from the async result for logs processing
+    from .actions_start import active_sessions
+    
+    # Get the nova instance and other data for logs processing
+    try:
+        session_data = active_sessions[session_id]
+        nova = session_data.get("nova_instance")
+    except:
+        # If we can't get session data, return the async result as-is
+        return result
+    
+    # Extract values from async result
+    current_url = result.get("current_url", "Unknown URL")
+    page_title = result.get("page_title", "Unknown Title")
+    browser_state = result.get("browser_state", {})
+    agent_thinking_messages = result.get("agent_thinking", [])
+    content_for_response = result.get("content", [])
+    
+    # Handle screenshot data if present
+    inline_screenshot = None
+    screenshot_status_message = None
+    for content_item in content_for_response:
+        if content_item.get("type") == "image_base64":
+            inline_screenshot = content_item.get("data")
+            break
+    
+    # Check for screenshot status in agent thinking
+    for msg in agent_thinking_messages:
+        if msg.get("source") == "inspect_browser" and "screenshot" in msg.get("content", "").lower():
+            screenshot_status_message = msg.get("content")
+            break
+
+    # Logs directory processing (synchronous part)
     logs_dir_from_session = active_sessions.get(session_id, {}).get("logs_dir")
     if logs_dir_from_session:
         logs_dir = logs_dir_from_session
@@ -191,23 +263,7 @@ def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inl
             } for f in log_files[:10]
         ]
 
-    content_for_response = [{"type": "text", "text": f"Current URL: {current_url}\nPage Title: {page_title}"}]
-    
-    # Add screenshot path to content if screenshot was captured
-    if screenshot_path:
-        content_for_response.append({
-            "type": "text", 
-            "text": f"\nScreenshot saved to: {screenshot_path}\nUse the fetch_file tool to retrieve the screenshot."
-        })
-    
-    # Add screenshot status message to agent_thinking if it exists (only happens when include_screenshot_flag is True)
-    if screenshot_status_message and not any(msg.get('content') == screenshot_status_message for msg in agent_thinking_messages):
-        agent_thinking_messages.append({
-            "type": "system_info",
-            "content": screenshot_status_message,
-            "source": "inspect_browser"
-        })
-
+    # Return the updated result with logs information
     return {
         "session_id": session_id,
         "current_url": current_url,
