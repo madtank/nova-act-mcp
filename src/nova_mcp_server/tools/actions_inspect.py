@@ -37,7 +37,8 @@ def inspect_browser_action(session_id: str, include_screenshot: bool = False) ->
 
     Args:
         session_id: The session ID to inspect
-        include_screenshot: If True, attempts to capture and include a base64 JPEG screenshot.
+        include_screenshot: If True, captures a screenshot and saves it to the logs directory.
+                           The screenshot path is returned in the response for retrieval via fetch_file.
                            Defaults to False to save LLM context space.
 
     Returns:
@@ -77,7 +78,6 @@ def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inl
     current_url = "Unknown URL"
     page_title = "Unknown Title"
     screenshot_status_message = None
-    inline_screenshot = None
 
     try:
         session_data = active_sessions[session_id]
@@ -126,17 +126,37 @@ def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inl
         agent_thinking_messages.append({"type": "system_error", "content": error_msg, "source": "inspect_browser"})
 
     # Screenshot logic: only try if include_screenshot_flag is True
+    screenshot_path = None
     if include_screenshot_flag:
         try:
             screenshot_data_bytes = nova.page.screenshot(type="jpeg", quality=inline_image_quality)
             log_debug(f"[{session_id}] Screenshot captured via nova.page, size: {len(screenshot_data_bytes) if screenshot_data_bytes else 0} bytes")
             if screenshot_data_bytes:
-                if len(screenshot_data_bytes) <= MAX_INLINE_IMAGE_BYTES:
-                    inline_screenshot = "data:image/jpeg;base64," + base64.b64encode(screenshot_data_bytes).decode()
-                    log_debug(f"[{session_id}] Screenshot prepared for inline ({len(screenshot_data_bytes)} bytes).")
+                # Save screenshot to file in logs directory
+                logs_dir_from_session = active_sessions.get(session_id, {}).get("logs_dir")
+                if logs_dir_from_session:
+                    logs_dir = logs_dir_from_session
                 else:
-                    screenshot_status_message = f"Screenshot captured but too large for inline response ({len(screenshot_data_bytes)}B > {MAX_INLINE_IMAGE_BYTES}B limit)."
+                    sdk_session_id_for_logs = active_sessions.get(session_id, {}).get("nova_session_id")
+                    logs_dir = _normalize_logs_dir(nova, sdk_session_id_override=sdk_session_id_for_logs)
+                
+                if logs_dir:
+                    # Create screenshot filename with timestamp
+                    timestamp = int(time.time() * 1000)
+                    screenshot_filename = f"screenshot_{session_id}_{timestamp}.jpg"
+                    screenshot_path = os.path.join(logs_dir, screenshot_filename)
+                    
+                    # Write screenshot to file
+                    with open(screenshot_path, 'wb') as f:
+                        f.write(screenshot_data_bytes)
+                    
+                    screenshot_status_message = f"Screenshot saved to: {screenshot_path} ({len(screenshot_data_bytes)} bytes)"
                     log_debug(f"[{session_id}] {screenshot_status_message}")
+                    browser_state["screenshot_path"] = screenshot_path
+                    browser_state["screenshot_size"] = len(screenshot_data_bytes)
+                else:
+                    screenshot_status_message = "Could not save screenshot: logs directory not available"
+                    log_warning(f"[{session_id}] {screenshot_status_message}")
                     agent_thinking_messages.append({"type": "system_warning", "content": screenshot_status_message, "source": "inspect_browser"})
         except Exception as e_screenshot:
             screenshot_status_message = f"Error capturing screenshot via nova.page.screenshot(): {str(e_screenshot)}"
@@ -173,12 +193,11 @@ def _inspect_browser(session_id: str, include_screenshot_flag: bool = False, inl
 
     content_for_response = [{"type": "text", "text": f"Current URL: {current_url}\nPage Title: {page_title}"}]
     
-    # Only add screenshot to content if include_screenshot_flag is True AND we have a valid screenshot
-    if include_screenshot_flag and inline_screenshot is not None:
-        content_for_response.insert(0, {
-            "type": "image_base64",
-            "data": inline_screenshot,
-            "caption": "Current viewport"
+    # Add screenshot path to content if screenshot was captured
+    if screenshot_path:
+        content_for_response.append({
+            "type": "text", 
+            "text": f"\nScreenshot saved to: {screenshot_path}\nUse the fetch_file tool to retrieve the screenshot."
         })
     
     # Add screenshot status message to agent_thinking if it exists (only happens when include_screenshot_flag is True)

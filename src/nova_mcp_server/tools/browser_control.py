@@ -97,7 +97,7 @@ async def execute_instruction(
 
 @mcp.tool(
     name="inspect_browser",
-    description="Retrieves current state (URL, title) of an active browser session. Screenshot is omitted by default. Set include_screenshot=True to get a base64 JPEG (can be large)."
+    description="Retrieves current state (URL, title) of an active browser session. Screenshot is omitted by default. Set include_screenshot=True to capture and save a screenshot to the logs directory (retrieve via fetch_file tool)."
 )
 async def inspect_browser( # Removed unused ctx parameter
     session_id: str, 

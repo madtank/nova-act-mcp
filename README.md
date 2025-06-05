@@ -3,13 +3,13 @@
 
 **nova‑act‑mcp‑server** is a zero‑install [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that exposes [Amazon Nova Act](https://nova.amazon.com/act) browser‑automation tools for AI agents.
 
-## What's New in v3.1.0
+## What's New in v3.2.0
 
-- **Simplified Tool Structure**: New tools `start_session`, `execute_instruction`, `end_session` for clearer interaction flow
-- **On-Demand Visual Feedback**: `inspect_browser` tool for explicit screenshots only when needed
-- **Progress Notifications**: Improved `start_session` with Inspector UI compatibility
-- **AI Agent Usability**: Enhanced error handling and clearer responses
-- **Reduced Token Usage**: Browser actions no longer automatically include screenshots by default
+- **File-Based Screenshots**: Screenshots now save to files instead of inline base64, eliminating MCP message size limits
+- **Optimized Image Quality**: Reduced screenshot quality (60/30) for smaller file sizes (~50KB vs 500KB+)  
+- **Enhanced Error Handling**: Improved exception handling for browser operations
+- **Better Testing**: Comprehensive test coverage for screenshot functionality
+- **MCP Inspector Integration**: New testing script for easy validation
 
 ## Quick Start (uvx)
 
