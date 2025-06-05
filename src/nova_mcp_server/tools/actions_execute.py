@@ -34,7 +34,7 @@ from ..session_manager import (
 from ..utils import extract_agent_thinking, _normalize_logs_dir
 
 
-def execute_browser_task_with_nova(
+async def execute_browser_task_with_nova_async(
     nova,
     task: str,
     instructions: str = "",
@@ -42,8 +42,7 @@ def execute_browser_task_with_nova(
     retry_attempts: int = MAX_RETRY_ATTEMPTS,
 ) -> Any:
     """
-    Execute a task with a Nova Act instance. This function MUST be called
-    from the same thread that created the Nova Act instance.
+    Execute a task with a Nova Act instance using thread-safe async wrapper.
     
     Args:
         nova: NovaAct instance
@@ -55,18 +54,51 @@ def execute_browser_task_with_nova(
     Returns:
         The NovaAct result object
     """
+    import anyio
+    
     # Combine task and instructions if both provided
     combined_instruction = task
     if instructions:
         combined_instruction = f"{task}\n\n{instructions}"
     
-    # Execute the task directly with Nova Act
+    # Helper function to execute nova.act safely
+    def _execute_nova_act():
+        return nova.act(
+            combined_instruction,
+            timeout=timeout,
+        )
+    
+    # Execute the task with thread-safe wrapper
     log(f"Executing task with timeout {timeout}s: {task}")
-    return nova.act(
-        combined_instruction,
-        timeout=timeout,
-        # progress_callback=progress_callback,  # Uncomment when NovaAct supports progress callbacks
-    )
+    return await anyio.to_thread.run_sync(_execute_nova_act, cancellable=True)
+
+def execute_browser_task_with_nova(
+    nova,
+    task: str,
+    instructions: str = "",
+    timeout: int = DEFAULT_TIMEOUT,
+    retry_attempts: int = MAX_RETRY_ATTEMPTS,
+) -> Any:
+    """
+    Synchronous wrapper for execute_browser_task_with_nova_async.
+    This function MUST be called from the same thread that created the Nova Act instance.
+    
+    Args:
+        nova: NovaAct instance
+        task: Task to execute
+        instructions: Instructions for the task
+        timeout: Timeout in seconds
+        retry_attempts: Number of retry attempts
+        
+    Returns:
+        The NovaAct result object
+    """
+    import anyio
+    
+    async def _run_async():
+        return await execute_browser_task_with_nova_async(nova, task, instructions, timeout, retry_attempts)
+    
+    return anyio.run(_run_async)
 
 
 def execute_browser_task(
@@ -397,6 +429,326 @@ def run_entire_execution_in_thread(
         # mcp_context is not returned, it's used for progress reporting if implemented
     }
 
+
+async def execute_session_action_async(
+    session_id: str,
+    task: str,
+    instructions: Optional[str] = None,
+    timeout: int = DEFAULT_TIMEOUT,
+    retry_attempts: int = MAX_RETRY_ATTEMPTS,
+    quiet: bool = False,
+    mcp_context: Optional[Any] = None
+) -> Dict[str, Any]:
+    """
+    Execute a task within an existing browser session. Async version with thread-safe Nova Act calls.
+    
+    Args:
+        session_id: The session ID to use
+        task: The task to execute
+        instructions: Additional instructions for the task
+        timeout: Timeout in seconds
+        retry_attempts: Number of retry attempts
+        quiet: Whether to suppress progress logging
+        mcp_context: MCP context for potential progress reporting
+        
+    Returns:
+        dict: A dictionary containing the results of the task execution
+    """
+    import anyio
+    
+    initialize_environment()
+    
+    if not session_id:
+        return {
+            "error": "Missing required parameter: session_id",
+            "error_code": "MISSING_PARAMETER",
+        }
+    
+    # Check if NovaAct is available
+    if not NOVA_ACT_AVAILABLE:
+        return {
+            "error": "Nova Act SDK is not installed. Please install it with: pip install nova-act",
+            "error_code": "NOVA_ACT_NOT_AVAILABLE",
+        }
+    
+    # Check if the session exists
+    nova = None
+    nova_session_id_attr = None
+    identity = None
+
+    with session_lock:
+        if session_id not in active_sessions:
+            return {
+                "error": f"Session not found: {session_id}",
+                "error_code": "SESSION_NOT_FOUND",
+            }
+        
+        # Get session data
+        session_data = active_sessions[session_id]
+        nova = session_data.get("nova_instance")
+        identity = session_data.get("identity")
+        
+        if not nova:
+            return {
+                "error": f"Nova instance not found for session: {session_id}",
+                "error_code": "NOVA_INSTANCE_NOT_FOUND",
+            }
+        
+        # Update the progress
+        active_sessions[session_id]["progress"] = {
+            "current_step": 0,
+            "total_steps": 1,
+            "current_action": "Starting task: " + task[:50] + "..." if len(task) > 50 else task,
+            "last_updated": time.time(),
+        }
+        active_sessions[session_id]["last_updated"] = time.time()
+        active_sessions[session_id]["status"] = "running"
+    
+    # Get Nova's session ID for debugging
+    if hasattr(nova, "session_id"):
+        nova_session_id_attr = nova.session_id
+    
+    try:
+        # Execute the task using the async version
+        log(f"Executing task: {task}")
+        
+        # Update progress
+        with session_lock:
+            if session_id in active_sessions:
+                active_sessions[session_id]["progress"] = {
+                    "current_step": 0,
+                    "total_steps": 1,
+                    "current_action": "Executing: " + task[:50] + "..." if len(task) > 50 else task,
+                    "last_updated": time.time(),
+                }
+                active_sessions[session_id]["last_updated"] = time.time()
+                active_sessions[session_id]["status"] = "running"
+        
+        # Call the async nova.act function
+        result = await execute_browser_task_with_nova_async(
+            nova, task, instructions, timeout, retry_attempts
+        )
+        
+        # Process the result (same logic as synchronous version)
+        task_success = False
+        step_results = []
+        error_message = None
+        html_log_path = None
+        current_url = None
+        
+        # Extract agent thinking and process result
+        agent_messages = []
+        debug_info_extract = {}
+
+        # Get SDK session ID for logs
+        sdk_session_id_for_logs = None
+        if hasattr(result, "metadata") and hasattr(result.metadata, "session_id"):
+            sdk_session_id_for_logs = result.metadata.session_id
+        elif hasattr(nova, "session_id") and nova.session_id:
+            sdk_session_id_for_logs = nova.session_id
+        
+        logs_dir = _normalize_logs_dir(nova, sdk_session_id_override=sdk_session_id_for_logs)
+        
+        if logs_dir:
+            html_files = sorted(
+                glob.glob(os.path.join(logs_dir, "*.html")),
+                key=lambda x: os.path.getmtime(x) if os.path.exists(x) else 0,
+                reverse=True,
+            )
+            if html_files:
+                html_log_path = html_files[0]
+                log_debug(f"Determined html_log_path: {html_log_path}")
+                
+                # Extract agent thinking
+                agent_messages, debug_info_extract = extract_agent_thinking(
+                    result=result,
+                    nova_instance=nova,
+                    html_path_to_parse=html_log_path,
+                    instruction=instructions,
+                )
+                
+                # Check for success indicators in agent thinking
+                if not task_success and agent_messages:
+                    for msg_content in [msg.get("content", "") for msg in agent_messages if isinstance(msg, dict)]:
+                        if isinstance(msg_content, str) and any(phrase in msg_content.lower() for phrase in [
+                            "task is complete", "task was complete", "successfully",
+                            "completed my instructions", "i have completed", "my task is complete"
+                        ]):
+                            log_info(f"Setting task_success=True based on agent thinking: '{msg_content[:100]}...'")
+                            task_success = True
+                            break
+        
+        # Process results based on result type (same logic as sync version)
+        if isinstance(result, dict):
+            task_success = result.get("success", False)
+            step_results = result.get("step_results", [])
+            error_message = result.get("error")
+            if "html_log_path" in result:
+                html_log_path = result["html_log_path"]
+        else:
+            # NovaAct result object
+            if hasattr(result, "success") and result.success is not None:
+                task_success = result.success
+            else:
+                has_results = hasattr(result, "results") and result.results
+                no_error = not (hasattr(result, "error") and result.error)
+                task_success = has_results and no_error
+            
+            # Extract step results
+            if hasattr(result, "results") and result.results:
+                for i, r in enumerate(result.results):
+                    step_result = {
+                        "step": i + 1,
+                        "success": r.success if hasattr(r, "success") else True,
+                        "action": r.action if hasattr(r, "action") else "unknown",
+                        "response": r.response if hasattr(r, "response") else "",
+                    }
+                    step_results.append(step_result)
+                    if step_result["success"]:
+                        task_success = True
+            
+            if not step_results and hasattr(result, "response"):
+                step_success = True
+                if hasattr(result, "success") and result.success is not None:
+                    step_success = result.success
+                    
+                step_results = [{
+                    "step": 1,
+                    "success": step_success,
+                    "action": "execute",
+                    "response": result.response if hasattr(result, "response") else "",
+                }]
+                
+                if not task_success and hasattr(result, "response") and result.response:
+                    task_success = True
+            
+            # Extract error message
+            if hasattr(result, "error") and result.error:
+                error_message = str(result.error)
+            elif not task_success and hasattr(result, "response") and result.response:
+                error_message = result.response
+        
+        # Final success check
+        if not task_success and step_results and not error_message:
+            log_debug("Setting success=True based on presence of step results and absence of error")
+            task_success = True
+        
+        # Get current URL with thread-safe call
+        if nova and hasattr(nova, 'page') and nova.page:
+            try:
+                def _get_current_url():
+                    return nova.page.url
+                
+                current_url = await anyio.to_thread.run_sync(_get_current_url, cancellable=True)
+                if current_url:
+                    log_debug(f"Retrieved current URL after execution: {current_url}")
+                    if current_url != "about:blank" and not task_success and step_results:
+                        log_info(f"Setting success=True based on URL change to {current_url}")
+                        task_success = True
+                else:
+                    log_warning("nova.page.url returned empty URL.")
+            except Exception as e:
+                log_error(f"Error retrieving current URL: {str(e)}")
+        else:
+            log_warning("Cannot retrieve URL: Nova instance or page not available.")
+        
+        # Update progress
+        with session_lock:
+            if session_id in active_sessions:
+                active_sessions[session_id]["progress"] = {
+                    "current_step": 1,
+                    "total_steps": 1,
+                    "current_action": "Completed: " + task[:50] + "..." if len(task) > 50 else task,
+                    "last_updated": time.time(),
+                }
+                active_sessions[session_id]["last_updated"] = time.time()
+                active_sessions[session_id]["status"] = "completed" if task_success else "failed"
+                
+                if current_url:
+                    active_sessions[session_id]["url"] = current_url
+                
+                if error_message:
+                    active_sessions[session_id]["progress"]["error"] = error_message
+        
+        # Prepare the result
+        result_dict = {
+            "session_id": session_id,
+            "nova_session_id": nova_session_id_attr,
+            "identity": identity,
+            "task": task,
+            "instructions": instructions,
+            "success": task_success,
+            "step_results": step_results,
+            "timestamp": time.time(),
+            "url": current_url,
+            "html_log_path": html_log_path,
+            "agent_thinking": agent_messages,
+        }
+                
+        # Add error message if available
+        if error_message:
+            result_dict["error"] = error_message
+            
+        # Add content field for compatibility
+        content = []
+        
+        if step_results:
+            for step in step_results:
+                if "response" in step and step["response"]:
+                    content.append({
+                        "type": "text",
+                        "text": step["response"]
+                    })
+        
+        if not content:
+            message = "Task executed successfully." if task_success else "Task execution failed."
+            if error_message:
+                message += f" Error: {error_message}"
+                
+            content.append({
+                "type": "text",
+                "text": message
+            })
+            
+        if current_url:
+            content.append({
+                "type": "url",
+                "url": current_url
+            })
+            
+        result_dict["content"] = content
+        
+        log(f"Task complete: {task_success}")
+        return result_dict
+    
+    except Exception as e:
+        error_details = traceback.format_exc()
+        log_error(f"Error executing browser session (async): {str(e)}\n{error_details}")
+        
+        with session_lock:
+            if session_id in active_sessions:
+                active_sessions[session_id]["progress"] = {
+                    "current_step": 0,
+                    "total_steps": 1,
+                    "current_action": "Error: " + str(e),
+                    "last_updated": time.time(),
+                    "error": str(e),
+                }
+                active_sessions[session_id]["last_updated"] = time.time()
+                active_sessions[session_id]["status"] = "failed"
+        
+        return {
+            "session_id": session_id,
+            "nova_session_id": nova_session_id_attr,
+            "identity": identity,
+            "task": task,
+            "instructions": instructions,
+            "success": False,
+            "error": str(e),
+            "error_details": error_details,
+            "timestamp": time.time(),
+            "content": [{"type": "text", "text": f"Error executing task: {str(e)}"}]
+        }
 
 # Renamed from execute_session_action and made synchronous
 def execute_session_action_sync( 

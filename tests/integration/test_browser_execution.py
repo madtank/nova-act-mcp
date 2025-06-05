@@ -24,7 +24,6 @@ async def single_session():
     yield session_id
     await end_session(session_id=session_id)
 
-@pytest.mark.xfail(reason="NovaAct/Playwright threading issues in pytest for execute_instruction", raises=AssertionError, strict=False)
 @pytest.mark.asyncio
 async def test_execute_simple_step_and_inspect(single_session): # Renamed
     sid = single_session # single_session fixture starts at example.com
@@ -52,7 +51,6 @@ async def test_execute_simple_step_and_inspect(single_session): # Renamed
     assert inspect_res.get("current_url") == "https://example.com/", "URL should still be example.com"
     assert "Example Domain" in inspect_res.get("page_title", ""), "Title should still be Example Domain"
 
-@pytest.mark.xfail(reason="NovaAct/Playwright threading issues in pytest for execute_instruction", raises=AssertionError, strict=False)
 @pytest.mark.asyncio
 async def test_execute_simple_steps_and_inspect(single_session):
     sid = single_session  # single_session fixture starts at example.com

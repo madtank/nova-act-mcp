@@ -18,7 +18,7 @@ from ..session_manager import active_sessions, session_lock # Still needed for s
 
 from .actions_start import initialize_browser_session
 # execute_session_action_sync will be called by execute_instruction tool
-from .actions_execute import execute_session_action_sync, MAX_RETRY_ATTEMPTS as EXECUTE_MAX_RETRY_ATTEMPTS
+from .actions_execute import execute_session_action_sync, execute_browser_task_with_nova_async, MAX_RETRY_ATTEMPTS as EXECUTE_MAX_RETRY_ATTEMPTS
 from .actions_end import end_session_action
 from .actions_inspect import inspect_browser_action, _inspect_browser_async # The sync action function and async function
 
@@ -81,17 +81,16 @@ async def execute_instruction(
             return {"error": f"Session {session_id} not found.", "error_code": "SESSION_NOT_FOUND"}
 
     try:
-        # execute_session_action_sync is the synchronous function from actions_execute.py
-        result = await anyio.to_thread.run_sync(
-            execute_session_action_sync,
-            session_id, task, instructions, timeout, retry_attempts, quiet, ctx,
-            cancellable=True
+        # Call the async execute function directly to avoid double-threading
+        from .actions_execute import execute_session_action_async
+        result = await execute_session_action_async(
+            session_id, task, instructions, timeout, retry_attempts, quiet, ctx
         )
     except anyio.get_cancelled_exc_class() as e_cancel:
         log_warning(f"execute_instruction for session {session_id} cancelled: {e_cancel}")
         return {"session_id": session_id, "error": "Execution cancelled", "success": False, "status": "cancelled"}
     except Exception as e_exec: # Catch general Exception
-        log_error(f"Exception from anyio.to_thread.run_sync for execute_instruction (session {session_id}): {str(e_exec)}\n{traceback.format_exc()}")
+        log_error(f"Exception in execute_instruction (session {session_id}): {str(e_exec)}\n{traceback.format_exc()}")
         return {"session_id": session_id, "error": f"Failed to execute instruction: {str(e_exec)}", "success": False, "status": "error", "error_details": traceback.format_exc()}
     return result
 
@@ -116,7 +115,6 @@ async def inspect_browser( # Removed unused ctx parameter
         result = await _inspect_browser_async(session_id, include_screenshot)
         
         # Handle logs directory processing separately (synchronous part)
-        from .actions_start import active_sessions
         from ..utils import _normalize_logs_dir
         
         # Get the nova instance for logs processing
